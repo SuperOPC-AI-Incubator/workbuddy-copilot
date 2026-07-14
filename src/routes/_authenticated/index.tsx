@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-meta";
 import type { Severity, TimelineKind } from "@/lib/timeline-meta";
+import { useServerFn } from "@tanstack/react-start";
+import { askAI, draftMentorTip } from "@/lib/ai.functions";
 
 export const Route = createFileRoute("/_authenticated/")({
   component: MentorDesk,
@@ -46,10 +48,21 @@ function MentorDesk() {
   const [collapsed, setCollapsed] = useState({ space: false, task: false });
   const [wsConnected, setWsConnected] = useState(false);
   const [userEmail, setUserEmail] = useState<string>("");
+  const [role, setRole] = useState<"mentor" | "student" | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const askAIFn = useServerFn(askAI);
+  const draftFn = useServerFn(draftMentorTip);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
+    supabase.auth.getUser().then(async ({ data }) => {
       setUserEmail(data.user?.email ?? "");
+      if (!data.user) return;
+      const { data: roles } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", data.user.id);
+      const isMentor = roles?.some((r) => r.role === "mentor");
+      setRole(isMentor ? "mentor" : "student");
     });
   }, []);
 
@@ -199,6 +212,53 @@ function MentorDesk() {
     }
   };
 
+  const sendStudentPrompt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = composeText.trim();
+    if (!text || !currentSessionId || aiBusy) return;
+    setComposeText("");
+    setAiBusy(true);
+    try {
+      await askAIFn({ data: { sessionId: currentSessionId, prompt: text } });
+    } catch (err) {
+      console.error(err);
+      setComposeText(text);
+      alert("AI 请求失败：" + (err as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const draftTip = async () => {
+    if (!currentSessionId || aiBusy) return;
+    setAiBusy(true);
+    try {
+      const { draft } = await draftFn({ data: { sessionId: currentSessionId } });
+      if (draft) setComposeText(draft);
+    } catch (err) {
+      console.error(err);
+      alert("草稿生成失败：" + (err as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const createSession = async () => {
+    if (role !== "student" || !currentStudentId) return;
+    const title = prompt("新对话标题？", "PLC 学习会话");
+    if (!title) return;
+    const { data, error } = await supabase
+      .from("sessions")
+      .insert({ student_id: currentStudentId, session_title: title, session_group: "task" })
+      .select()
+      .single();
+    if (error) {
+      alert("创建失败：" + error.message);
+      return;
+    }
+    if (data) setCurrentSessionId(data.id);
+  };
+
   const signOut = async () => {
     await supabase.auth.signOut();
     navigate({ to: "/auth", replace: true });
@@ -226,6 +286,8 @@ function MentorDesk() {
           onToggle={(g) => setCollapsed((c) => ({ ...c, [g]: !c[g] }))}
           onSelect={setCurrentSessionId}
           student={currentStudent}
+          canCreate={role === "student" && !!currentStudentId}
+          onCreate={createSession}
         />
         <TimelinePanel
           items={timeline}
@@ -233,7 +295,10 @@ function MentorDesk() {
           session={currentSession}
           composeText={composeText}
           onComposeChange={setComposeText}
-          onSend={sendMentor}
+          onSend={role === "student" ? sendStudentPrompt : sendMentor}
+          role={role}
+          aiBusy={aiBusy}
+          onDraftTip={draftTip}
         />
       </main>
     </div>
