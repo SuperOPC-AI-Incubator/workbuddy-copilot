@@ -60,6 +60,7 @@ export type Database = {
           last_active_at: string
           last_severity: Database["public"]["Enums"]["severity"]
           updated_at: string
+          user_id: string | null
         }
         Insert: {
           created_at?: string
@@ -68,6 +69,7 @@ export type Database = {
           last_active_at?: string
           last_severity?: Database["public"]["Enums"]["severity"]
           updated_at?: string
+          user_id?: string | null
         }
         Update: {
           created_at?: string
@@ -76,6 +78,7 @@ export type Database = {
           last_active_at?: string
           last_severity?: Database["public"]["Enums"]["severity"]
           updated_at?: string
+          user_id?: string | null
         }
         Relationships: []
       }
@@ -120,14 +123,42 @@ export type Database = {
           },
         ]
       }
+      user_roles: {
+        Row: {
+          created_at: string
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
+      app_role: "mentor" | "student"
       session_group: "space" | "task"
       severity: "ok" | "warn" | "error"
       timeline_kind: "prompt" | "reply" | "diagnosis" | "mentor"
@@ -258,6 +289,7 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      app_role: ["mentor", "student"],
       session_group: ["space", "task"],
       severity: ["ok", "warn", "error"],
       timeline_kind: ["prompt", "reply", "diagnosis", "mentor"],
