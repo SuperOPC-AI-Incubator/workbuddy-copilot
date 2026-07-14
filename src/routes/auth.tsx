@@ -13,6 +13,7 @@ function AuthPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [role, setRole] = useState<"student" | "mentor">("student");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
@@ -35,7 +36,10 @@ function AuthPage() {
           password,
           options: {
             emailRedirectTo: window.location.origin,
-            data: { display_name: displayName || email.split("@")[0] },
+            data: {
+              display_name: displayName || email.split("@")[0],
+              role,
+            },
           },
         });
         if (error) throw error;
@@ -84,15 +88,39 @@ function AuthPage() {
         </div>
         <form onSubmit={onSubmit} className="space-y-3">
           {mode === "signup" && (
-            <label className="block text-xs">
-              <span className="mb-1 block text-muted-foreground">昵称（可选）</span>
-              <input
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
-                placeholder="张老师"
-              />
-            </label>
+            <>
+              <label className="block text-xs">
+                <span className="mb-1 block text-muted-foreground">昵称（可选）</span>
+                <input
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                  placeholder="张老师 / 陈同学"
+                />
+              </label>
+              <div className="block text-xs">
+                <span className="mb-1 block text-muted-foreground">身份</span>
+                <div className="flex gap-2">
+                  {(["student", "mentor"] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setRole(r)}
+                      className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
+                        role === r
+                          ? "border-primary bg-primary/10 text-foreground"
+                          : "text-muted-foreground hover:bg-accent"
+                      }`}
+                    >
+                      {r === "student" ? "学员" : "导师"}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  学员：只能看到并管理自己的对话；导师：可观察全部学员的学习过程。
+                </p>
+              </div>
+            </>
           )}
           <label className="block text-xs">
             <span className="mb-1 block text-muted-foreground">邮箱</span>
