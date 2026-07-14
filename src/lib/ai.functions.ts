@@ -71,7 +71,7 @@ const MENTOR_SYSTEM = `你是资深 PLC 工程师，正在协助导师给学员�
 
 export const askAI = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) =>
+  .validator((input: unknown) =>
     z.object({ sessionId: z.string().uuid(), prompt: z.string().min(1).max(2000) }).parse(input),
   )
   .handler(async ({ data, context }) => {
@@ -143,7 +143,7 @@ export const askAI = createServerFn({ method: "POST" })
 
 export const draftMentorTip = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) =>
+  .validator((input: unknown) =>
     z.object({ sessionId: z.string().uuid() }).parse(input),
   )
   .handler(async ({ data, context }) => {
