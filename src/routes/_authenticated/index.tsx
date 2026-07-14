@@ -1,8 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/mock-data";
-import type { Severity, TimelineKind } from "@/lib/mock-data";
+import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-meta";
+import type { Severity, TimelineKind } from "@/lib/timeline-meta";
 
 export const Route = createFileRoute("/_authenticated/")({
   component: MentorDesk,
