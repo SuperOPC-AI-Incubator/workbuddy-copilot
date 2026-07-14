@@ -243,6 +243,24 @@ function MentorDesk() {
     }
   };
 
+  const callMentor = async () => {
+    if (role !== "student" || !currentSessionId || aiBusy) return;
+    const note = window.prompt("向导师说明一下情况（可留空）：", "") ?? "";
+    const text = note.trim()
+      ? `🆘 呼叫导师：${note.trim()}`
+      : "🆘 学员请求导师协助";
+    const { data: userRes } = await supabase.auth.getUser();
+    const { error } = await supabase.from("timeline_items").insert({
+      session_id: currentSessionId,
+      kind: "diagnosis",
+      text,
+      severity: "error",
+      tag: "呼叫导师",
+      author_id: userRes.user?.id ?? null,
+    });
+    if (error) alert("呼叫失败：" + error.message);
+  };
+
   const createSession = async () => {
     if (role !== "student" || !currentStudentId) return;
     const title = prompt("新对话标题？", "PLC 学习会话");
@@ -299,6 +317,7 @@ function MentorDesk() {
           role={role}
           aiBusy={aiBusy}
           onDraftTip={draftTip}
+          onCallMentor={callMentor}
         />
       </main>
     </div>
