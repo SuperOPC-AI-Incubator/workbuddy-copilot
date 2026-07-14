@@ -619,6 +619,7 @@ function TimelinePanel({
   role,
   aiBusy,
   onDraftTip,
+  onCallMentor,
 }: {
   items: TimelineItem[];
   student: Student | null;
@@ -629,6 +630,7 @@ function TimelinePanel({
   role: "mentor" | "student" | null;
   aiBusy: boolean;
   onDraftTip: () => void;
+  onCallMentor: () => void;
 }) {
   const isStudent = role === "student";
   return (
@@ -680,6 +682,21 @@ function TimelinePanel({
               title="用 AI 起草一条导师提示"
             >
               {aiBusy ? "生成中…" : "AI 起草"}
+            </button>
+          )}
+          {isStudent && (
+            <button
+              type="button"
+              onClick={onCallMentor}
+              disabled={!session || aiBusy}
+              className="rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+              style={{
+                borderColor: "var(--status-red)",
+                color: "var(--status-red)",
+              }}
+              title="向导师发出紧急协助请求"
+            >
+              🆘 呼叫导师
             </button>
           )}
           <button
