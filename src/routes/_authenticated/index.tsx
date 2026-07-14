@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-meta";
 import type { Severity, TimelineKind } from "@/lib/timeline-meta";
@@ -194,7 +194,7 @@ function MentorDesk() {
     setCurrentSessionId(null);
   };
 
-  const sendMentor = async (e: React.FormEvent) => {
+  const sendMentor = async (e: FormEvent) => {
     e.preventDefault();
     const text = composeText.trim();
     if (!text || !currentSessionId) return;
@@ -212,7 +212,7 @@ function MentorDesk() {
     }
   };
 
-  const sendStudentPrompt = async (e: React.FormEvent) => {
+  const sendStudentPrompt = async (e: FormEvent) => {
     e.preventDefault();
     const text = composeText.trim();
     if (!text || !currentSessionId || aiBusy) return;
