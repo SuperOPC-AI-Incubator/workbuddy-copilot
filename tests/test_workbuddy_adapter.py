@@ -159,7 +159,7 @@ def test_repeated_transcript_reads_close_every_probe_connection(
     monkeypatch.setattr(adapter, "_connect_readonly", tracking_connect)
 
     for _ in range(10):
-        result = adapter.read_transcript("session-space")
+        result = adapter.read_transcript("fixture-session-space")
         assert result.failure is None
     adapter.list_sessions()
     adapter.list_workspaces()
@@ -350,16 +350,16 @@ def test_transcript_byte_budget_is_per_file_not_aggregate(tmp_path: Path) -> Non
         )
     adapter = WorkBuddyDataAdapter(config_dir)
 
-    result = adapter.read_transcript("session-space")
+    result = adapter.read_transcript("fixture-session-space")
 
     assert result.failure is None
-    assert "Please help me reason about the loop." in result.content
+    assert "Please explain this fixture example." in result.content
 
 
 def test_transcript_index_candidates_store_metadata_not_content(
     adapter: WorkBuddyDataAdapter,
 ) -> None:
-    result = adapter.read_transcript("session-space")
+    result = adapter.read_transcript("fixture-session-space")
 
     assert result.failure is None
     assert adapter._transcript_index is not None
@@ -382,11 +382,11 @@ def test_metadata_index_reads_a_then_a_different_valid_b(tmp_path: Path) -> None
     )
     adapter = WorkBuddyDataAdapter(config_dir)
 
-    first = adapter.read_transcript("session-space")
+    first = adapter.read_transcript("fixture-session-space")
     second = adapter.read_transcript("session-task")
 
     assert first.failure is None
-    assert "Please help me reason about the loop." in first.content
+    assert "Please explain this fixture example." in first.content
     assert second.failure is None
     assert "second transcript" in second.content
 
@@ -394,17 +394,17 @@ def test_metadata_index_reads_a_then_a_different_valid_b(tmp_path: Path) -> None
 def test_metadata_index_rejects_inode_replacement_after_index(
     adapter: WorkBuddyDataAdapter,
 ) -> None:
-    first = adapter.read_transcript("session-space")
+    first = adapter.read_transcript("fixture-session-space")
     assert first.failure is None
     assert adapter._transcript_index is not None
-    candidate = adapter._transcript_index["session-space"][0]
+    candidate = adapter._transcript_index["fixture-session-space"][0]
     transcript_path = adapter.projects_dir / candidate.relative_path
     replacement = transcript_path.with_name("replacement.tmp")
     replacement.write_text(
         json.dumps(
             {
                 "type": "message",
-                "session_id": "session-space",
+                "session_id": "fixture-session-space",
                 "content": "replacement transcript",
             }
         )
@@ -414,7 +414,7 @@ def test_metadata_index_rejects_inode_replacement_after_index(
     os.replace(replacement, transcript_path)
     assert transcript_path.stat().st_ino != candidate.inode
 
-    result = adapter.read_transcript("session-space")
+    result = adapter.read_transcript("fixture-session-space")
 
     assert result.failure is not None
     assert result.failure.code == "transcript_index_incomplete"
@@ -424,10 +424,10 @@ def test_metadata_index_rejects_inode_replacement_after_index(
 def test_metadata_index_revalidates_session_id_after_same_inode_content_change(
     adapter: WorkBuddyDataAdapter,
 ) -> None:
-    first = adapter.read_transcript("session-space")
+    first = adapter.read_transcript("fixture-session-space")
     assert first.failure is None
     assert adapter._transcript_index is not None
-    candidate = adapter._transcript_index["session-space"][0]
+    candidate = adapter._transcript_index["fixture-session-space"][0]
     transcript_path = adapter.projects_dir / candidate.relative_path
     transcript_path.write_text(
         json.dumps(
@@ -442,7 +442,7 @@ def test_metadata_index_revalidates_session_id_after_same_inode_content_change(
     )
     assert transcript_path.stat().st_ino == candidate.inode
 
-    result = adapter.read_transcript("session-space")
+    result = adapter.read_transcript("fixture-session-space")
 
     assert result.failure is not None
     assert result.failure.code == "transcript_index_incomplete"
@@ -456,7 +456,7 @@ def test_ambiguous_target_releases_temporary_parent_descriptor(
     _write_transcript(
         config_dir,
         "projects/other/duplicate.jsonl",
-        "session-space",
+        "fixture-session-space",
         "duplicate",
     )
     adapter = WorkBuddyDataAdapter(config_dir)
@@ -477,7 +477,7 @@ def test_ambiguous_target_releases_temporary_parent_descriptor(
     monkeypatch.setattr(os, "dup", tracking_dup)
     monkeypatch.setattr(os, "close", tracking_close)
 
-    result = adapter.read_transcript("session-space")
+    result = adapter.read_transcript("fixture-session-space")
 
     assert result.failure is not None
     assert result.failure.code == "transcript_ambiguous"
