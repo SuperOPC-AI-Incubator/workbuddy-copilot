@@ -77,14 +77,20 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "WorkBuddy Copilot · 导师观察台" },
+      {
+        name: "description",
+        content:
+          "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
+      },
+      { name: "author", content: "WorkBuddy" },
+      { property: "og:title", content: "WorkBuddy Copilot · 导师观察台" },
+      {
+        property: "og:description",
+        content: "实时观察学员 PLC 学习进程，一键发送导师提示。",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
     ],
     links: [
       {
