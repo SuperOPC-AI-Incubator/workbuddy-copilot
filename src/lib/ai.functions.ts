@@ -2,10 +2,9 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { answerStudentPrompt, createMentorDraft } from "./ai.server";
 
 // Keep this file as thin server-function wrappers; implementation lives in ai.server.ts
-// so TanStack Start's production splitter never depends on same-file helper closures.
+// and is loaded inside handlers so client-side planning never imports server-only modules.
 export const askAI = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((input: unknown) =>
@@ -31,6 +30,7 @@ export const askAI = createServerFn({ method: "POST" })
     let severity: "ok" | "warn" | "error" = "ok";
     let tag = "";
     try {
+      const { answerStudentPrompt } = await import("./ai.server");
       const answer = await answerStudentPrompt(supabase, data.sessionId, data.prompt, apiKey);
       reply = answer.reply;
       diagnosis = answer.diagnosis;
@@ -73,6 +73,7 @@ export const draftMentorTip = createServerFn({ method: "POST" })
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) throw new Error("Missing DEEPSEEK_API_KEY");
 
+    const { createMentorDraft } = await import("./ai.server");
     const draft = await createMentorDraft(context.supabase, data.sessionId, apiKey);
     return { draft };
   });
