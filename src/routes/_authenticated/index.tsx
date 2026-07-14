@@ -597,6 +597,9 @@ function TimelinePanel({
   composeText,
   onComposeChange,
   onSend,
+  role,
+  aiBusy,
+  onDraftTip,
 }: {
   items: TimelineItem[];
   student: Student | null;
@@ -604,7 +607,11 @@ function TimelinePanel({
   composeText: string;
   onComposeChange: (v: string) => void;
   onSend: (e: React.FormEvent) => void;
+  role: "mentor" | "student" | null;
+  aiBusy: boolean;
+  onDraftTip: () => void;
 }) {
+  const isStudent = role === "student";
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <div className="flex shrink-0 items-start justify-between border-b bg-card px-6 py-3">
@@ -635,21 +642,34 @@ function TimelinePanel({
             type="text"
             value={composeText}
             onChange={(e) => onComposeChange(e.target.value)}
-            disabled={!session}
+            disabled={!session || aiBusy}
             placeholder={
-              session
-                ? `向 ${student?.display_name ?? "学员"} 发送导师提示…`
-                : "选中对话后可发送提示…"
+              !session
+                ? "选中对话后可发送…"
+                : isStudent
+                  ? "向 AI 提问 PLC 相关问题…"
+                  : `向 ${student?.display_name ?? "学员"} 发送导师提示…`
             }
             className="flex-1 rounded-md border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"
           />
+          {role === "mentor" && (
+            <button
+              type="button"
+              onClick={onDraftTip}
+              disabled={!session || aiBusy}
+              className="rounded-md border px-3 py-2 text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+              title="用 AI 起草一条导师提示"
+            >
+              {aiBusy ? "生成中…" : "AI 起草"}
+            </button>
+          )}
           <button
             type="submit"
-            disabled={!session || !composeText.trim()}
+            disabled={!session || !composeText.trim() || aiBusy}
             className="rounded-md px-4 py-2 text-sm font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
             style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
           >
-            发送
+            {isStudent ? (aiBusy ? "AI 回答中…" : "提问") : "发送"}
           </button>
         </form>
         <Legend />
