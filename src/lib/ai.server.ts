@@ -95,15 +95,31 @@ export async function answerStudentPrompt(
   ];
 
   const raw = await callDeepseek(apiKey, messages, { json: true, temperature: 0.4 });
-  const parsed = JSON.parse(raw) as {
-    reply?: string;
-    diagnosis?: string;
-    severity?: string;
-    tag?: string;
+  type Parsed = { reply?: string; diagnosis?: string; severity?: string; tag?: string };
+  let parsed: Parsed = {};
+  const tryParse = (s: string): Parsed | null => {
+    try { return JSON.parse(s) as Parsed; } catch { return null; }
   };
+  if (raw) {
+    parsed = tryParse(raw) ?? {};
+    if (!parsed.reply) {
+      // Attempt to extract JSON object substring
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (match) parsed = tryParse(match[0]) ?? parsed;
+    }
+  }
+  if (!parsed.reply) {
+    // Fallback: treat entire raw text as reply
+    return {
+      reply: raw?.trim() || "AI 暂无回复，请稍后重试。",
+      diagnosis: "",
+      severity: "ok",
+      tag: "",
+    };
+  }
 
   return {
-    reply: parsed.reply?.trim() || raw,
+    reply: parsed.reply.trim(),
     diagnosis: parsed.diagnosis?.trim() ?? "",
     severity: parsed.severity === "warn" || parsed.severity === "error" ? parsed.severity : "ok",
     tag: parsed.tag?.trim() ?? "",
