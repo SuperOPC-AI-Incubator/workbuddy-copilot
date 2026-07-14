@@ -465,6 +465,8 @@ function SessionPanel({
   onToggle,
   onSelect,
   student,
+  canCreate,
+  onCreate,
 }: {
   sessions: Session[];
   currentId: string | null;
@@ -472,6 +474,8 @@ function SessionPanel({
   onToggle: (g: "space" | "task") => void;
   onSelect: (id: string) => void;
   student: Student | null;
+  canCreate?: boolean;
+  onCreate?: () => void;
 }) {
   const grouped = useMemo(
     () => ({
@@ -483,7 +487,18 @@ function SessionPanel({
 
   return (
     <section className="flex min-h-0 flex-col border-r bg-card">
-      <PanelHeader title="对话" count={sessions.length} />
+      <div className="flex h-11 shrink-0 items-center justify-between border-b px-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <span>对话 · {sessions.length}</span>
+        {canCreate && (
+          <button
+            type="button"
+            onClick={onCreate}
+            className="rounded border px-2 py-0.5 text-[11px] normal-case tracking-normal hover:bg-accent"
+          >
+            + 新对话
+          </button>
+        )}
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {sessions.length === 0 ? (
           <EmptyState text={student ? "该学员暂无对话" : "请先选择一个学员"} />
