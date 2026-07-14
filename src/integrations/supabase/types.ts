@@ -14,7 +14,112 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      sessions: {
+        Row: {
+          created_at: string
+          id: string
+          last_severity: Database["public"]["Enums"]["severity"]
+          session_group: Database["public"]["Enums"]["session_group"]
+          session_title: string
+          student_id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          last_severity?: Database["public"]["Enums"]["severity"]
+          session_group?: Database["public"]["Enums"]["session_group"]
+          session_title: string
+          student_id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          last_severity?: Database["public"]["Enums"]["severity"]
+          session_group?: Database["public"]["Enums"]["session_group"]
+          session_title?: string
+          student_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sessions_student_id_fkey"
+            columns: ["student_id"]
+            isOneToOne: false
+            referencedRelation: "students"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      students: {
+        Row: {
+          created_at: string
+          display_name: string
+          id: string
+          last_active_at: string
+          last_severity: Database["public"]["Enums"]["severity"]
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          display_name: string
+          id?: string
+          last_active_at?: string
+          last_severity?: Database["public"]["Enums"]["severity"]
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          display_name?: string
+          id?: string
+          last_active_at?: string
+          last_severity?: Database["public"]["Enums"]["severity"]
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      timeline_items: {
+        Row: {
+          author_id: string | null
+          created_at: string
+          id: string
+          kind: Database["public"]["Enums"]["timeline_kind"]
+          session_id: string
+          severity: Database["public"]["Enums"]["severity"] | null
+          tag: string | null
+          text: string
+        }
+        Insert: {
+          author_id?: string | null
+          created_at?: string
+          id?: string
+          kind: Database["public"]["Enums"]["timeline_kind"]
+          session_id: string
+          severity?: Database["public"]["Enums"]["severity"] | null
+          tag?: string | null
+          text: string
+        }
+        Update: {
+          author_id?: string | null
+          created_at?: string
+          id?: string
+          kind?: Database["public"]["Enums"]["timeline_kind"]
+          session_id?: string
+          severity?: Database["public"]["Enums"]["severity"] | null
+          tag?: string | null
+          text?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "timeline_items_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
@@ -23,7 +128,9 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      session_group: "space" | "task"
+      severity: "ok" | "warn" | "error"
+      timeline_kind: "prompt" | "reply" | "diagnosis" | "mentor"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +257,10 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      session_group: ["space", "task"],
+      severity: ["ok", "warn", "error"],
+      timeline_kind: ["prompt", "reply", "diagnosis", "mentor"],
+    },
   },
 } as const
