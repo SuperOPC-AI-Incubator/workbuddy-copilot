@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-meta";
 import type { Severity, TimelineKind } from "@/lib/timeline-meta";
+import { useServerFn } from "@tanstack/react-start";
+import { askAI, draftMentorTip } from "@/lib/ai.functions";
 
 export const Route = createFileRoute("/_authenticated/")({
   component: MentorDesk,
@@ -46,10 +48,21 @@ function MentorDesk() {
   const [collapsed, setCollapsed] = useState({ space: false, task: false });
   const [wsConnected, setWsConnected] = useState(false);
   const [userEmail, setUserEmail] = useState<string>("");
+  const [role, setRole] = useState<"mentor" | "student" | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const askAIFn = useServerFn(askAI);
+  const draftFn = useServerFn(draftMentorTip);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
+    supabase.auth.getUser().then(async ({ data }) => {
       setUserEmail(data.user?.email ?? "");
+      if (!data.user) return;
+      const { data: roles } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", data.user.id);
+      const isMentor = roles?.some((r) => r.role === "mentor");
+      setRole(isMentor ? "mentor" : "student");
     });
   }, []);
 
@@ -199,6 +212,53 @@ function MentorDesk() {
     }
   };
 
+  const sendStudentPrompt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = composeText.trim();
+    if (!text || !currentSessionId || aiBusy) return;
+    setComposeText("");
+    setAiBusy(true);
+    try {
+      await askAIFn({ data: { sessionId: currentSessionId, prompt: text } });
+    } catch (err) {
+      console.error(err);
+      setComposeText(text);
+      alert("AI 请求失败：" + (err as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const draftTip = async () => {
+    if (!currentSessionId || aiBusy) return;
+    setAiBusy(true);
+    try {
+      const { draft } = await draftFn({ data: { sessionId: currentSessionId } });
+      if (draft) setComposeText(draft);
+    } catch (err) {
+      console.error(err);
+      alert("草稿生成失败：" + (err as Error).message);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const createSession = async () => {
+    if (role !== "student" || !currentStudentId) return;
+    const title = prompt("新对话标题？", "PLC 学习会话");
+    if (!title) return;
+    const { data, error } = await supabase
+      .from("sessions")
+      .insert({ student_id: currentStudentId, session_title: title, session_group: "task" })
+      .select()
+      .single();
+    if (error) {
+      alert("创建失败：" + error.message);
+      return;
+    }
+    if (data) setCurrentSessionId(data.id);
+  };
+
   const signOut = async () => {
     await supabase.auth.signOut();
     navigate({ to: "/auth", replace: true });
@@ -226,6 +286,8 @@ function MentorDesk() {
           onToggle={(g) => setCollapsed((c) => ({ ...c, [g]: !c[g] }))}
           onSelect={setCurrentSessionId}
           student={currentStudent}
+          canCreate={role === "student" && !!currentStudentId}
+          onCreate={createSession}
         />
         <TimelinePanel
           items={timeline}
@@ -233,7 +295,10 @@ function MentorDesk() {
           session={currentSession}
           composeText={composeText}
           onComposeChange={setComposeText}
-          onSend={sendMentor}
+          onSend={role === "student" ? sendStudentPrompt : sendMentor}
+          role={role}
+          aiBusy={aiBusy}
+          onDraftTip={draftTip}
         />
       </main>
     </div>
@@ -400,6 +465,8 @@ function SessionPanel({
   onToggle,
   onSelect,
   student,
+  canCreate,
+  onCreate,
 }: {
   sessions: Session[];
   currentId: string | null;
@@ -407,6 +474,8 @@ function SessionPanel({
   onToggle: (g: "space" | "task") => void;
   onSelect: (id: string) => void;
   student: Student | null;
+  canCreate?: boolean;
+  onCreate?: () => void;
 }) {
   const grouped = useMemo(
     () => ({
@@ -418,7 +487,18 @@ function SessionPanel({
 
   return (
     <section className="flex min-h-0 flex-col border-r bg-card">
-      <PanelHeader title="对话" count={sessions.length} />
+      <div className="flex h-11 shrink-0 items-center justify-between border-b px-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+        <span>对话 · {sessions.length}</span>
+        {canCreate && (
+          <button
+            type="button"
+            onClick={onCreate}
+            className="rounded border px-2 py-0.5 text-[11px] normal-case tracking-normal hover:bg-accent"
+          >
+            + 新对话
+          </button>
+        )}
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {sessions.length === 0 ? (
           <EmptyState text={student ? "该学员暂无对话" : "请先选择一个学员"} />
@@ -517,6 +597,9 @@ function TimelinePanel({
   composeText,
   onComposeChange,
   onSend,
+  role,
+  aiBusy,
+  onDraftTip,
 }: {
   items: TimelineItem[];
   student: Student | null;
@@ -524,7 +607,11 @@ function TimelinePanel({
   composeText: string;
   onComposeChange: (v: string) => void;
   onSend: (e: React.FormEvent) => void;
+  role: "mentor" | "student" | null;
+  aiBusy: boolean;
+  onDraftTip: () => void;
 }) {
+  const isStudent = role === "student";
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <div className="flex shrink-0 items-start justify-between border-b bg-card px-6 py-3">
@@ -555,21 +642,34 @@ function TimelinePanel({
             type="text"
             value={composeText}
             onChange={(e) => onComposeChange(e.target.value)}
-            disabled={!session}
+            disabled={!session || aiBusy}
             placeholder={
-              session
-                ? `向 ${student?.display_name ?? "学员"} 发送导师提示…`
-                : "选中对话后可发送提示…"
+              !session
+                ? "选中对话后可发送…"
+                : isStudent
+                  ? "向 AI 提问 PLC 相关问题…"
+                  : `向 ${student?.display_name ?? "学员"} 发送导师提示…`
             }
             className="flex-1 rounded-md border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"
           />
+          {role === "mentor" && (
+            <button
+              type="button"
+              onClick={onDraftTip}
+              disabled={!session || aiBusy}
+              className="rounded-md border px-3 py-2 text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+              title="用 AI 起草一条导师提示"
+            >
+              {aiBusy ? "生成中…" : "AI 起草"}
+            </button>
+          )}
           <button
             type="submit"
-            disabled={!session || !composeText.trim()}
+            disabled={!session || !composeText.trim() || aiBusy}
             className="rounded-md px-4 py-2 text-sm font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
             style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
           >
-            发送
+            {isStudent ? (aiBusy ? "AI 回答中…" : "提问") : "发送"}
           </button>
         </form>
         <Legend />
