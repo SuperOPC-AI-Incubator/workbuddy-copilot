@@ -606,7 +606,7 @@ function TimelinePanel({
   session: Session | null;
   composeText: string;
   onComposeChange: (v: string) => void;
-  onSend: (e: React.FormEvent) => void;
+  onSend: (e: FormEvent) => void;
   role: "mentor" | "student" | null;
   aiBusy: boolean;
   onDraftTip: () => void;
