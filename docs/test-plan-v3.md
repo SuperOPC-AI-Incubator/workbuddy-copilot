@@ -104,6 +104,12 @@ Student Core 的完整导入树不得加载 `AppKit`、`Foundation`、`objc` 或
    Service。
 7. 每个临时探针使用独立临时子目录，由自己的 context/finalizer 清理；禁止扫描或删除
    其他并发测试的探针命名空间。
+8. 诊断测试使用注入的假探针和脱敏系统 fixture，禁止扫描开发机的真实环境、凭据或
+   用户目录。环境变量只断言“已配置/未配置”，测试输出不得包含其值。
+9. 学员问答集成测试必须用真临时 Store + 确定性假 LLM 验证完整上下文组合和持久化；
+   只断言“调用了 LLM”或 patch 掉上下文组装层不算通过。
+10. 自动化默认无外网；LLM capability 的凭据缺失、上游失败和重试分支由确定性假输入驱动，
+    不把真 TokenHub/DeepSeek 调用作为自动验收前置。
 
 推荐的本地隔离总门：
 
@@ -130,6 +136,11 @@ rm -rf "$TMP_HOME"
 | 鉴权 | student token 访问 mentor、public 空 token、日志泄 token | 请求或日志门失败 |
 | 双轴状态 | 传输 stored 后令诊断失败；同 SHA 重试诊断 | transfer 保持 stored，analysis=failed 后可重试 |
 | UI | 移除主线程 dispatch、状态来源改为本地猜测、使用 innerHTML、断 WS | component/E2E 红 |
+| 诊断脱敏 | 暂时跳过 token/Authorization/邮箱/主目录替换，或改为返回环境变量值 | SA-4 红，且确定性秘密字符串出现在输出断言中 |
+| 问答上下文 | 移除五层任一层，把消息从中间截断，或让未同步 session 回退到其他会话 | SA-5/SA-6 红，假 LLM 收到的确定性标记缺失或串话 |
+| LLM capability | 把 `disabled/missing_api_key/misconfigured/timeout/upstream_error` 合并为“LLM 未启动” | SA-7 红，结构化状态和自检建议不匹配 |
+| 会话选择 | 让快捷项使用独立数据源，或去掉“任务在前”分组 | SA-1 红，下拉框与最近 3 项顺序/选中值不同步 |
+| 大型本地对话集 | 恢复“把全部 transcript 正文读入单一聚合索引” | SA-9 红，无关文件超过固定总预算后目标会话不可读 |
 
 ### 4.1 当前 MVP 学员身份负控
 
@@ -252,7 +263,33 @@ Windows WorkBuddy 事实的结果必须标为 `BLOCKED: real-machine evidence mi
 | S6 | 保留当前会话、问答上下文和提示词；共享 core 契约 + macOS 真机，Windows 当前会话证据受 W0 阻塞。 |
 | P3 | 所有原 P3 清单继续保留；拆为 Linux server、macOS client、Windows W0/W1 三份发布证据，记录版本、域名/TLS、真机和回滚结果。 |
 
-## 8. 交付判定
+## 8. AI 助教当前问题补强验收（v3-only）
+
+下表只增强 v3，不修改、替换或放宽 v2 的任何判定标准。自动化默认无外网，每项在
+宣布通过前都必须按 §4 登记并撤销 breaker，在 `docs/dev-log.md` 保留 RED/GREEN 证据。
+
+| ID | 验收范围 | 确定性判定 |
+|---|---|---|
+| SA-1 | 完整会话下拉框 + 最近 3 个快捷项 | 任务在前、工作空间在后，组内按 `last_activity_at` 倒序；快捷项等于同一有序列表的前 3 项；任一控件切换后两处选中 session_id 一致。 |
+| SA-2 | 学员端明确空状态 | `no_local_sessions`、`not_synced`、`synced_no_analysis`、`service_unavailable`、`llm_unavailable` 使用不同文案/状态码，不得都映射为“暂无分析记录”。 |
+| SA-3 | Copilot 回答可复制 | 请求完成后文本视图仍可选中；复制操作写入的内容与完整回答字节等价，不丢换行。 |
+| SA-4 | `DiagnosticBundle` 合同、默认与脱敏 | 客户端默认 `include_diagnostics=true`，取消勾选后即使传 bundle 也不入上下文且入库为 false；正式字段为 `schema_version=diagnostic-bundle/v1`，缺失/非法版本不入 LLM 且不伪记 v1；服务端只允许 `system/versions/environment/proxy/tools/paths/permissions/reachability/recent_errors/truncated`，对每类字段做类型/枚举/长度规范化，`environment/proxy` 只保留 `{name:{configured: bool}}`，未知类别、原始字符串环境值和任意文件内容不入 LLM；条目/单条/总体积有界；裸 `sk-*`、长 token、camelCase/named key/token、Basic/Bearer/AWS4 等完整 Authorization、Cookie 全部字段、邮箱和主目录被替换，有用错误类型/组件/堆栈尾部保留；无参数 collector 默认有工具/路径/权限/代理/`not_probed` 连接状态与最近错误环，且不访问外网；platform/version/`Path.home/cwd`/`os.access` 任一默认探针抛错时返回 `unknown/probe_error`且其余采集继续。`/api/student/ask` 对请求体、标识字段、question、诊断字节和节点数均有上限；超限在 LLM/Store 副作用前返回 413/422，无 Content-Length 与 chunked 也不得绕过。 |
+| SA-5 | 五层问答上下文 | 用真临时 Store + 确定性假 LLM 验证其收到：所选会话完整消息边界、该会话 analyses、该学员近期 asks、本次脱敏诊断、启用的 config runtime guidance；另一学员/另一 session trap 不出现；`list_student_asks(limit=3)` 在 SQL 层限量；raw 由 Store 在 SQL 层只选必要列并用 `substr` 返回有界尾部，不调用旧全量方法；只解析经头尾换行边界证明完整的 JSONL 行，短无换行片段、头尾半行和 parse 失败纯文本均不进上下文。预算内五层全部保留；超预算按当前 session、analysis、prior asks、diagnostic、guidance 顺序保留完整 block，不切半消息。 |
+| SA-6 | 本机未同步会话 | 服务端缺少所选 session 时返回 `context_status=not_synced`；`sync_then_ask` 在未入库时仍为 `not_synced`、入库后才为 `ready`；`without_session` 不含任何 session 消息/分析，不回退到其他会话。 |
+| SA-7 | LLM capability 可观测与降级 | 确定性分支分别返回 `ready`、`disabled`、`missing_api_key`、`misconfigured`、`timeout`、`upstream_error`，并带与状态相符的可执行自检/重试建议；非 URL、缺 host 或非 `http/https` 的 `api_base` 在调用 provider 前返回 `misconfigured`；不统一降级为“LLM 未启动”。`context_status` 仅允许 `ready`、`not_synced`、`without_session`、`no_context`。 |
+| SA-8 | runtime guidance 选择与可追溯性 | 本期只从 config 读取；启用版本被加入假 LLM 上下文，禁用版本不加入且不记录；`student_asks` 持久化实际 guidance version，同时持久化已验证诊断 `schema_version`、是否附加和 `llm_status`。 |
+| SA-9 | 大型本地对话集全量同步 | fixture 含超过 8 MiB 的无关 transcripts 与一个目标 session；适配器仅索引有界元数据，按需读目标正文，目标不因无关文件的聚合字节总量而失败；模糊、symlink、描述符竞态和 typed failure 防线仍通过。 |
+| SA-10 | 导师发起同步的离线与双轴反馈 | 学员离线时立即显示“未连接，已排队”且请求入库；重连后转为领取/传输状态；内容传输与 LLM 诊断独立展示，失败显示可执行原因和重试，不从按钮点击或 WS 猜测成功。 |
+
+建议聚焦命令（实际用例名可随实现调整，判定标准不得放宽）：
+
+```bash
+$PY -m pytest tests/test_student_diagnostics.py tests/test_student_ask_api.py tests/test_llm.py -q
+$PY -m pytest tests/test_floating_native_phase3.py -q
+$PY -m pytest tests/test_workbuddy_adapter.py tests/test_upload_requests.py tests/e2e/test_mentor_ui.py -q
+```
+
+## 9. 交付判定
 
 只有以下条件全部满足，才能宣称跨平台重构完成：
 
@@ -266,6 +303,8 @@ Windows WorkBuddy 事实的结果必须标为 `BLOCKED: real-machine evidence mi
    Windows 框架，并明确 rollout blocked。
 8. 在路由从认证 principal 派生 `student_id` 并拒绝不匹配值前，发布材料不得宣称学员级
    或租户级数据隔离。
+9. SA-1~SA-10 全部有自动化与 breaker RED/GREEN 证据；诊断与问答集成使用真临时 Store +
+   确定性假 LLM，且自动化过程中没有使用外网或泄露环境变量值。
 
 每轮验证把命令、输出摘要、判定、失败分析与修复次数追加到
 [`dev-log.md`](dev-log.md)。继承停止条件：单项失败 5 次、振荡 2 次、总修复 15 次或

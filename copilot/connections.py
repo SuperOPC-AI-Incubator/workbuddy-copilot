@@ -37,6 +37,10 @@ class WSRegistry:
             self.floats.pop(student_id, None)
         log.info("float WS disconnected student=%s count=%d", student_id, len(pool))
 
+    def is_float_connected(self, student_id: str) -> bool:
+        """Return the current in-process connection state for one student."""
+        return bool(self.floats.get(student_id))
+
     def register_mentor(self, ws: Any) -> None:
         self.mentors.add(ws)
         log.info("mentor WS connected count=%d", len(self.mentors))

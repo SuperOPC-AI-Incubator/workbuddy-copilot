@@ -127,6 +127,48 @@ def test_adapter_indexes_transcript_by_jsonl_session_id_not_cwd_encoding(
     assert "Please explain this fixture example." in result.content
 
 
+def test_repeated_transcript_reads_close_every_probe_connection(
+    adapter: WorkBuddyDataAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_connect = adapter._connect_readonly
+    opened_connections = []
+
+    class TrackingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *args, **kwargs):
+            return self.connection.execute(*args, **kwargs)
+
+        def close(self):
+            self.closed = True
+            self.connection.close()
+
+    def tracking_connect():
+        connection = TrackingConnection(original_connect())
+        opened_connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(adapter, "_connect_readonly", tracking_connect)
+
+    for _ in range(10):
+        result = adapter.read_transcript("session-space")
+        assert result.failure is None
+    adapter.list_sessions()
+    adapter.list_workspaces()
+
+    assert len(opened_connections) == 14
+    assert all(connection.closed for connection in opened_connections)
+    adapter.close()
+
+
 def test_probe_returns_schema_mismatch_instead_of_empty_success(tmp_path: Path) -> None:
     config_dir = tmp_path / ".workbuddy"
     config_dir.mkdir()
@@ -294,6 +336,154 @@ def test_transcript_index_stops_at_bounded_byte_budget(tmp_path: Path) -> None:
 
     assert result.failure is not None
     assert result.failure.code == "transcript_index_incomplete"
+
+
+def test_transcript_byte_budget_is_per_file_not_aggregate(tmp_path: Path) -> None:
+    config_dir = _materialize_macos_workbuddy(tmp_path)
+    one_megabyte = "x" * (1024 * 1024)
+    for number in range(9):
+        _write_transcript(
+            config_dir,
+            f"projects/bulk/{number:02d}.jsonl",
+            f"bulk-session-{number}",
+            one_megabyte,
+        )
+    adapter = WorkBuddyDataAdapter(config_dir)
+
+    result = adapter.read_transcript("session-space")
+
+    assert result.failure is None
+    assert "Please help me reason about the loop." in result.content
+
+
+def test_transcript_index_candidates_store_metadata_not_content(
+    adapter: WorkBuddyDataAdapter,
+) -> None:
+    result = adapter.read_transcript("session-space")
+
+    assert result.failure is None
+    assert adapter._transcript_index is not None
+    candidates = [
+        candidate
+        for matches in adapter._transcript_index.values()
+        for candidate in matches
+    ]
+    assert candidates
+    assert all("content" not in candidate.__dataclass_fields__ for candidate in candidates)
+
+
+def test_metadata_index_reads_a_then_a_different_valid_b(tmp_path: Path) -> None:
+    config_dir = _materialize_macos_workbuddy(tmp_path)
+    _write_transcript(
+        config_dir,
+        "projects/second/session-task.jsonl",
+        "session-task",
+        "second transcript",
+    )
+    adapter = WorkBuddyDataAdapter(config_dir)
+
+    first = adapter.read_transcript("session-space")
+    second = adapter.read_transcript("session-task")
+
+    assert first.failure is None
+    assert "Please help me reason about the loop." in first.content
+    assert second.failure is None
+    assert "second transcript" in second.content
+
+
+def test_metadata_index_rejects_inode_replacement_after_index(
+    adapter: WorkBuddyDataAdapter,
+) -> None:
+    first = adapter.read_transcript("session-space")
+    assert first.failure is None
+    assert adapter._transcript_index is not None
+    candidate = adapter._transcript_index["session-space"][0]
+    transcript_path = adapter.projects_dir / candidate.relative_path
+    replacement = transcript_path.with_name("replacement.tmp")
+    replacement.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "session_id": "session-space",
+                "content": "replacement transcript",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(replacement, transcript_path)
+    assert transcript_path.stat().st_ino != candidate.inode
+
+    result = adapter.read_transcript("session-space")
+
+    assert result.failure is not None
+    assert result.failure.code == "transcript_index_incomplete"
+    assert "replacement transcript" not in result.content
+
+
+def test_metadata_index_revalidates_session_id_after_same_inode_content_change(
+    adapter: WorkBuddyDataAdapter,
+) -> None:
+    first = adapter.read_transcript("session-space")
+    assert first.failure is None
+    assert adapter._transcript_index is not None
+    candidate = adapter._transcript_index["session-space"][0]
+    transcript_path = adapter.projects_dir / candidate.relative_path
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "type": "message",
+                "session_id": "different-session",
+                "content": "same inode, different session",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert transcript_path.stat().st_ino == candidate.inode
+
+    result = adapter.read_transcript("session-space")
+
+    assert result.failure is not None
+    assert result.failure.code == "transcript_index_incomplete"
+    assert "same inode, different session" not in result.content
+
+
+def test_ambiguous_target_releases_temporary_parent_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = _materialize_macos_workbuddy(tmp_path)
+    _write_transcript(
+        config_dir,
+        "projects/other/duplicate.jsonl",
+        "session-space",
+        "duplicate",
+    )
+    adapter = WorkBuddyDataAdapter(config_dir)
+    original_dup = os.dup
+    original_close = os.close
+    duplicated: list[int] = []
+    closed: list[int] = []
+
+    def tracking_dup(fd: int) -> int:
+        duplicated_fd = original_dup(fd)
+        duplicated.append(duplicated_fd)
+        return duplicated_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        original_close(fd)
+
+    monkeypatch.setattr(os, "dup", tracking_dup)
+    monkeypatch.setattr(os, "close", tracking_close)
+
+    result = adapter.read_transcript("session-space")
+
+    assert result.failure is not None
+    assert result.failure.code == "transcript_ambiguous"
+    assert duplicated
+    assert set(duplicated) <= set(closed)
+    adapter.close()
 
 
 def test_malformed_jsonl_makes_transcript_index_typed_incomplete(

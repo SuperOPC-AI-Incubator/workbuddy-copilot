@@ -72,6 +72,11 @@ from AppKit import (
     NSTextField,
     NSTextView,
     NSButton,
+    NSPopUpButton,
+    NSPasteboard,
+    NSPasteboardTypeString,
+    NSSwitchButton,
+    NSControlStateValueOn,
     NSAttributedString,
     NSFont,
     NSForegroundColorAttributeName,
@@ -117,6 +122,170 @@ PENDING_RECEIPT_PAGE_LIMIT = 64
 MAX_PENDING_RECEIPT_PAGES_PER_SYNC = 8
 PENDING_RECEIPT_RETRY_DELAY_SECONDS = 2.0
 PENDING_RECEIPT_DIRECT_ACK_LIMIT = 64
+SESSION_SELECTOR_LIMIT = 1000
+
+_EMPTY_STATE_MESSAGES = {
+    "no_local_sessions": "还没有发现 WorkBuddy 对话。先在 WorkBuddy 中开始一个对话吧。",
+    "not_synced": "当前对话尚未同步。请先同步最近内容，或不带对话上下文直接提问。",
+    "synced_no_analysis": "当前对话已同步，但还没有分析记录。你仍可以直接向 Copilot 提问。",
+    "service_unavailable": "Copilot 服务暂时不可用。请确认服务已启动后重试。",
+    "llm_unavailable": "Copilot 已连接，但 LLM 暂不可用。请检查模型配置或稍后重试。",
+}
+
+
+def _session_activity_ts(session: dict[str, Any]) -> float:
+    for key in ("last_activity_at", "last_activity", "last_ts", "resumed_at", "updated_at", "created_at"):
+        value = session.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _sort_sessions_for_selector(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the shared dropdown/shortcut order without mutating callers."""
+    group_rank = {"task": 0, "space": 1}
+    return sorted(
+        (dict(session) for session in sessions if session.get("session_id")),
+        key=lambda session: (
+            group_rank.get(str(session.get("group_type") or ""), 2),
+            -_session_activity_ts(session),
+            str(session.get("session_id") or ""),
+        ),
+    )
+
+
+def _session_inventory_signature(sessions: list[dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
+    """Capture raw inventory and sort inputs for worker-snapshot freshness checks."""
+    return tuple(
+        (
+            str(session.get("session_id") or ""),
+            str(session.get("session_title") or session.get("title") or ""),
+            str(session.get("group_type") or ""),
+            str(session.get("space_name") or ""),
+            _session_activity_ts(session),
+            bool(session.get("is_active")),
+        )
+        for session in sessions
+    )
+
+
+def _session_selector_render_signature(
+    sessions: list[dict[str, Any]],
+    session_state: dict[str, dict[str, Any]],
+    current_session_id: str | None,
+) -> tuple[tuple[Any, ...], ...]:
+    """Capture only values that affect the already-sorted native selector UI."""
+    group_labels = {"task": "任务", "space": "空间"}
+    current = str(current_session_id or "")
+    return tuple(
+        (
+            session_id,
+            str(
+                session.get("session_title")
+                or session.get("title")
+                or session_id[:8]
+                or "?"
+            ),
+            group_labels.get(str(session.get("group_type") or ""), "其他"),
+            str(session.get("space_name") or ""),
+            bool(session.get("is_active")),
+            session_state.get(session_id, {}).get("unread", 0),
+            session_id == current,
+        )
+        for session in sessions
+        if (session_id := str(session.get("session_id") or ""))
+    )
+
+
+def _empty_state_message(state: str) -> str:
+    return _EMPTY_STATE_MESSAGES.get(state, _EMPTY_STATE_MESSAGES["synced_no_analysis"])
+
+
+def _analysis_empty_state(
+    local_sessions: list[dict[str, Any]],
+    current_session_id: str | None,
+    synced_session_ids: set[str],
+    service_available: bool,
+    llm_status: str,
+) -> str:
+    if not service_available:
+        return "service_unavailable"
+    if llm_status and llm_status != "ready":
+        return "llm_unavailable"
+    if not local_sessions:
+        return "no_local_sessions"
+    if current_session_id and current_session_id not in synced_session_ids:
+        return "not_synced"
+    return "synced_no_analysis"
+
+
+def _format_student_ask_response(data: dict[str, Any]) -> tuple[str, str, str]:
+    """Turn the structured ask contract into readable, legacy-safe text."""
+    answer = str(data.get("answer") or "Copilot 暂时没有返回答案。")
+    context_status = str(data.get("context_status") or "ready")
+    # Missing status means an older service did not report capability.  It is
+    # not evidence that the configured upstream LLM is usable.
+    llm_status = str(data.get("llm_status") or "unknown")
+    retry_guidance = str(data.get("retry_guidance") or "").strip()
+
+    notes: list[str] = []
+    if context_status == "not_synced":
+        notes.append("当前对话尚未同步，这次回答未使用该对话的完整上下文。")
+    elif context_status == "without_session":
+        notes.append("这次提问没有选择对话，回答未带对话上下文。")
+    elif context_status == "no_context":
+        notes.append("已选择对话，但暂时没有可用的对话上下文。")
+    if llm_status == "unknown":
+        notes.append("当前服务未报告 LLM 状态（unknown），无法确认模型是否可用。")
+    elif llm_status != "ready":
+        notes.append(f"LLM 暂不可用（{llm_status}），下方是 Copilot 的降级指引。")
+    diagnostics_attached = data.get("diagnostics_attached")
+    if diagnostics_attached is True:
+        notes.append("本次已附加脱敏诊断信息。")
+    elif diagnostics_attached is False:
+        notes.append("本次未附加诊断信息。")
+
+    if not notes and not retry_guidance:
+        return answer, context_status, llm_status
+    parts = notes + [answer]
+    if retry_guidance and retry_guidance not in answer:
+        parts.append(retry_guidance)
+    return "\n\n".join(part for part in parts if part), context_status, llm_status
+
+
+def _collect_diagnostic_bundle() -> dict[str, Any] | None:
+    try:
+        from .student_core.diagnostics import collect_diagnostic_bundle
+    except (ImportError, AttributeError):
+        return None
+    try:
+        bundle = collect_diagnostic_bundle()
+    except Exception as exc:
+        log.debug("收集诊断信息失败: %s", exc)
+        return None
+    return bundle if isinstance(bundle, dict) else None
+
+
+def _record_recent_error(component: str, error: BaseException | str) -> None:
+    """Best-effort bridge to the bounded, redacted Student Core error ring."""
+    try:
+        from .student_core.diagnostics import record_recent_error
+
+        record_recent_error(component, error)
+    except Exception:
+        # Diagnostics must never turn a recoverable student-side failure into a new failure.
+        log.debug("诊断错误环写入失败 component=%s", component)
+
+
+def _copy_text_to_pasteboard(text: str, pasteboard=None) -> bool:
+    if not text:
+        return False
+    board = pasteboard or NSPasteboard.generalPasteboard()
+    board.clearContents()
+    return bool(board.setString_forType_(text, NSPasteboardTypeString))
 
 
 def _rect_xywh(rect) -> tuple[float, float, float, float]:
@@ -572,6 +741,21 @@ class CopilotNativeApp(NSObject):
         self._sessions_list = []       # 切换栏显示的有序列表
         self._current_session_id = None
         self._wb_sessions = []         # WorkBuddy 侧会话列表（/current_session 返回）
+        self._synced_session_ids: set[str] = set()
+        self._service_available = True
+        self._context_status = "ready"
+        self._llm_status = "unknown"
+        self._llm_retry_guidance = "正在确认 LLM 配置状态。"
+        self._session_popup_ids: list[str] = []
+        self._recent_session_ids: list[str] = []
+        self._rendered_session_signature: tuple[tuple[Any, ...], ...] = ()
+        self._refresh_inflight = False
+        self._refresh_pending = False
+        self._refresh_request_generation = 0
+        self._poll_fallback_inflight = False
+        self._poll_fallback_generation = 0
+        self._ask_generation = 0
+        self._ask_inflight_generation: int | None = None
 
         # 创建应用
         app = NSApplication.sharedApplication()
@@ -600,11 +784,17 @@ class CopilotNativeApp(NSObject):
 
         # 启动时立即同步拉一次当前对话（不等 2.5s 定时器）
         try:
-            cdata = self._read_local_current_session() or self._get_json("/current_session", timeout=3)
+            local_data = self._read_local_current_session()
+            if local_data:
+                cdata = local_data
+                self._wb_sessions = list(local_data.get("items", []) or [])
+            else:
+                # 服务端 current_session 只用于回退定位，不能冒充本地完整对话清单。
+                self._wb_sessions = []
+                cdata = CopilotNativeApp._get_scoped_server_current_session(self) or {}
             active = cdata.get("session_id")
             if active:
                 self._current_session_id = active
-                self._wb_sessions = cdata.get("items", [])
                 log.info("初始当前对话: %s", active[:8])
         except Exception as e:
             log.warning("启动拉取当前对话失败: %s", e)
@@ -698,12 +888,13 @@ class CopilotNativeApp(NSObject):
         # 布局常量（NSPanel contentView 坐标系：左下原点）
         margin = 12.0
         titlebar_reserve = 60.0      # titlebar + 顶部边距
-        bar_h = 38.0                 # 对话切换栏高度
+        bar_h = 72.0                 # 完整下拉选择器 + 最近 3 个快捷项
         gap = 8.0
         ask_input_h = 30.0
         ask_answer_h = 92.0
         ask_gap = 6.0
-        ask_area_h = ask_input_h + ask_gap + ask_answer_h
+        diagnostics_h = 20.0
+        ask_area_h = ask_input_h + ask_gap + diagnostics_h + ask_gap + ask_answer_h
         scroll_y = margin + ask_area_h + gap
         scroll_h = PANEL_MAX_HEIGHT - titlebar_reserve - bar_h - gap - ask_area_h - gap
         inner_w = PANEL_WIDTH - margin * 2
@@ -739,9 +930,10 @@ class CopilotNativeApp(NSObject):
         content_view.addSubview_(self.scroll_view)
 
         # Copilot 回答区（底部，可滚动）
-        answer_y = margin + ask_input_h + ask_gap
+        answer_y = margin + ask_input_h + ask_gap + diagnostics_h + ask_gap
+        copy_w = 52.0
         self.ask_answer_scroll = NSScrollView.alloc().initWithFrame_(
-            NSMakeRect(margin, answer_y, inner_w, ask_answer_h)
+            NSMakeRect(margin, answer_y, inner_w - copy_w - 6, ask_answer_h)
         )
         self.ask_answer_scroll.setHasVerticalScroller_(True)
         self.ask_answer_scroll.setAutohidesScrollers_(True)
@@ -749,7 +941,7 @@ class CopilotNativeApp(NSObject):
         self.ask_answer_scroll.setBackgroundColor_(_panel_card_color())
         self.ask_answer_scroll.contentView().setBackgroundColor_(_panel_card_color())
         self.ask_answer_view = NSTextView.alloc().initWithFrame_(
-            NSMakeRect(0, 0, inner_w, ask_answer_h)
+            NSMakeRect(0, 0, inner_w - copy_w - 6, ask_answer_h)
         )
         self.ask_answer_view.setEditable_(False)
         self.ask_answer_view.setSelectable_(True)
@@ -760,6 +952,23 @@ class CopilotNativeApp(NSObject):
         self.ask_answer_view.setString_("有问题可以直接问 Copilot。")
         self.ask_answer_scroll.setDocumentView_(self.ask_answer_view)
         content_view.addSubview_(self.ask_answer_scroll)
+
+        self.copy_answer_button = NSButton.alloc().initWithFrame_(
+            NSMakeRect(margin + inner_w - copy_w, answer_y + ask_answer_h - 28, copy_w, 26)
+        )
+        self.copy_answer_button.setTitle_("复制")
+        self.copy_answer_button.setTarget_(self)
+        self.copy_answer_button.setAction_("copyAnswerClicked:")
+        content_view.addSubview_(self.copy_answer_button)
+
+        self.diagnostics_checkbox = NSButton.alloc().initWithFrame_(
+            NSMakeRect(margin, margin + ask_input_h + ask_gap, 190, diagnostics_h)
+        )
+        self.diagnostics_checkbox.setButtonType_(NSSwitchButton)
+        self.diagnostics_checkbox.setTitle_("附加诊断信息（自动脱敏）")
+        self.diagnostics_checkbox.setState_(NSControlStateValueOn)
+        self.diagnostics_checkbox.setFont_(NSFont.systemFontOfSize_(11))
+        content_view.addSubview_(self.diagnostics_checkbox)
 
         # 提问输入框 + 发送按钮
         send_w = 68.0
@@ -818,20 +1027,90 @@ class CopilotNativeApp(NSObject):
         """
         try:
             data = self._read_local_current_session()
-            if not data:
-                data = self._get_json("/current_session", timeout=3)
         except Exception:
             return
 
+        if data:
+            # A local snapshot is authoritative and invalidates any outstanding
+            # server fallback result without waiting for its network timeout.
+            self._poll_fallback_generation = int(
+                getattr(self, "_poll_fallback_generation", 0)
+            ) + 1
+            CopilotNativeApp._apply_current_session_poll(self, data, local_source=True)
+            return
+
+        self._wb_sessions = []
+        self._sessions_list = []
+        if not str(getattr(self, "_student_id", "") or ""):
+            self._service_available = False
+            self._context_status = "missing_student_id"
+            self._llm_status = "unknown"
+            return
+        if bool(getattr(self, "_poll_fallback_inflight", False)):
+            return
+
+        generation = int(getattr(self, "_poll_fallback_generation", 0)) + 1
+        self._poll_fallback_generation = generation
+        self._poll_fallback_inflight = True
+        threading.Thread(
+            target=CopilotNativeApp._poll_server_current_session_worker,
+            args=(self, generation),
+            daemon=True,
+        ).start()
+
+    def _poll_server_current_session_worker(self, generation: int):
+        """Fetch the server fallback without blocking the AppKit timer thread."""
+        try:
+            data = CopilotNativeApp._get_scoped_server_current_session(self)
+            callback = CopilotNativeApp._apply_server_current_session.__get__(self, type(self))
+            if data is None:
+                AppHelper.callAfter(callback, generation, None, "MissingStudentId")
+                return
+            AppHelper.callAfter(callback, generation, data, "")
+        except Exception as exc:
+            _record_recent_error("current_session_fallback", exc)
+            callback = CopilotNativeApp._apply_server_current_session.__get__(self, type(self))
+            AppHelper.callAfter(callback, generation, None, type(exc).__name__)
+
+    def _get_scoped_server_current_session(self) -> dict[str, Any] | None:
+        """Fetch fallback state only when an explicit student identity is present."""
+        student_id = str(getattr(self, "_student_id", "") or "").strip()
+        if not student_id:
+            return None
+        return self._get_json(
+            "/current_session",
+            query={"student_id": student_id},
+            timeout=3,
+        )
+
+    def _apply_server_current_session(
+        self,
+        generation: int,
+        data: dict[str, Any] | None,
+        error_type: str,
+    ):
+        """Apply a server fallback only while it is the latest poll request."""
+        if generation != int(getattr(self, "_poll_fallback_generation", 0)):
+            self._poll_fallback_inflight = False
+            return
+        self._poll_fallback_inflight = False
+        if error_type:
+            log.debug("读取服务端当前对话失败 type=%s", error_type)
+            return
+        if data:
+            CopilotNativeApp._apply_current_session_poll(self, data, local_source=False)
+
+    def _apply_current_session_poll(self, data: dict[str, Any], *, local_source: bool):
+        """Apply one local or server current-session snapshot on the AppKit thread."""
         active_sid = data.get("session_id")
         if not active_sid:
             return
 
         # 用 /current_session 返回的完整列表更新切换栏数据（包含 WorkBuddy 所有对话）
-        items = data.get("items", [])
-        if items:
-            self._wb_sessions = items  # 缓存 WorkBuddy 侧的会话列表
-
+        items = list(data.get("items", []) or []) if local_source else []
+        if local_source:
+            self._wb_sessions = items
+            self._sessions_list = _sort_sessions_for_selector(items)
         # 同步 session 标题到内存
         for it in items:
             sid = it.get("session_id")
@@ -842,6 +1121,15 @@ class CopilotNativeApp(NSObject):
                 elif title:
                     self._sessions[sid]["title"] = title
 
+        selector_changed = (
+            _session_selector_render_signature(
+                list(getattr(self, "_sessions_list", []) or []),
+                getattr(self, "_sessions", {}),
+                getattr(self, "_current_session_id", None),
+            )
+            != tuple(getattr(self, "_rendered_session_signature", ()) or ())
+        )
+
         changed = (active_sid != self._current_session_id)
         if changed:
             log.info("检测到当前对话切换: %s -> %s", (self._current_session_id or "?")[:8], active_sid[:8])
@@ -851,18 +1139,21 @@ class CopilotNativeApp(NSObject):
                 self._refresh_data()
             else:
                 # 面板可见 → 不切走，只更新切换栏标记 + 图标
-                self._rebuild_session_bar()
-                self._update_icon_state()
-        elif self._panel_visible:
-            # 没变化但面板可见 → 刷新切换栏的激活标记（标题可能更新了）
+                if selector_changed:
+                    self._rebuild_session_bar()
+                    self._update_icon_state()
+        elif self._panel_visible and selector_changed:
+            # 最终排序或可见菜单状态变化时才重建大下拉框。
             self._rebuild_session_bar()
+            self._update_icon_state()
 
     def _read_local_current_session(self) -> dict[str, Any] | None:
         """Read WorkBuddy's local session list and infer the current session."""
         try:
-            sessions = wb_sync.read_sessions(limit=8)
+            sessions = wb_sync.read_sessions(limit=SESSION_SELECTOR_LIMIT)
         except Exception as exc:
-            log.debug("读取本地 WorkBuddy 当前会话失败: %s", exc)
+            _record_recent_error("workbuddy_read", exc)
+            log.debug("读取本地 WorkBuddy 当前会话失败 type=%s", type(exc).__name__)
             return None
         items: list[dict[str, Any]] = []
         for idx, session in enumerate(sessions):
@@ -874,85 +1165,263 @@ class CopilotNativeApp(NSObject):
                 "session_id": session_id,
                 "work_dir": str(session.get("work_dir") or session.get("cwd") or ""),
                 "resumed_at": last_ts,
+                "last_activity_at": last_ts,
                 "session_title": str(session.get("title") or session.get("session_title") or ""),
-                "is_active": idx == 0,
+                "group_type": str(session.get("group_type") or ""),
+                "space_name": str(session.get("space_name") or ""),
+                "is_active": False,
             })
         if not items:
             return None
-        items.sort(key=lambda item: item.get("resumed_at") or 0.0, reverse=True)
-        for idx, item in enumerate(items):
-            item["is_active"] = idx == 0
+        active_sid = max(items, key=_session_activity_ts)["session_id"]
+        items = _sort_sessions_for_selector(items)
+        for item in items:
+            item["is_active"] = item["session_id"] == active_sid
         return {
-            "session_id": items[0]["session_id"],
-            "work_dir": items[0]["work_dir"],
-            "resumed_at": items[0]["resumed_at"],
+            "session_id": active_sid,
+            "work_dir": next(item["work_dir"] for item in items if item["session_id"] == active_sid),
+            "resumed_at": next(item["resumed_at"] for item in items if item["session_id"] == active_sid),
             "items": items,
         }
 
     def _refresh_data(self):
-        """从后端拉取对话列表 + 当前对话的分析数据。"""
+        """调度后台刷新；AppKit 主线程不执行网络 I/O。"""
+        generation = int(getattr(self, "_refresh_request_generation", 0)) + 1
+        self._refresh_request_generation = generation
+        if bool(getattr(self, "_refresh_inflight", False)):
+            self._refresh_pending = True
+            return False
+
+        self._refresh_inflight = True
+        self._refresh_pending = False
+        student = str(getattr(self, "_student_id", "") or "")
+        if not student:
+            # Every server-side student collection requires an explicit
+            # identity.  Never degrade into an unfiltered request.
+            self._refresh_inflight = False
+            self._service_available = False
+            self._context_status = "missing_student_id"
+            self._llm_status = "unknown"
+            self._llm_retry_guidance = "缺少 student_id，已停止学员数据请求。"
+            try:
+                self._rebuild_cards()
+            except Exception:
+                log.exception("显示缺少学员标识状态失败")
+            return False
+        current_session_id = str(getattr(self, "_current_session_id", "") or "")
+        local_sessions = list(getattr(self, "_wb_sessions", []) or [])
+        llm_status = str(getattr(self, "_llm_status", "unknown") or "unknown")
+        threading.Thread(
+            target=CopilotNativeApp._refresh_data_worker,
+            args=(self, generation, student, current_session_id, local_sessions, llm_status),
+            daemon=True,
+        ).start()
+        return True
+
+    def _refresh_data_worker(
+        self,
+        generation: int,
+        student: str,
+        current_session_id: str,
+        local_sessions: list[dict[str, Any]],
+        llm_status: str,
+    ):
+        if not student:
+            callback = CopilotNativeApp._apply_refresh_failure.__get__(self, type(self))
+            AppHelper.callAfter(callback, generation, "MissingStudentId", "")
+            return
         try:
-            student = self._student_id
+            local_snapshot = _sort_sessions_for_selector(local_sessions)
+            capability_query = {"student_id": student}
+            try:
+                capability_data = self._get_json(
+                    "/api/student/capabilities",
+                    query=capability_query,
+                    timeout=5,
+                )
+                if not isinstance(capability_data, dict):
+                    capability_data = {}
+            except Exception as exc:
+                # An older otherwise-healthy service may not expose this
+                # endpoint. Keep the UI usable, but never claim LLM readiness.
+                log.debug("获取 LLM 能力状态失败 type=%s", type(exc).__name__)
+                capability_data = {}
 
-            # 1) 优先用 WorkBuddy 侧的会话列表（/current_session 返回，含所有对话+激活标记）
-            #    回退到 DB 侧的 /sessions（只有产生过分析的对话）
-            if hasattr(self, "_wb_sessions") and self._wb_sessions:
-                self._sessions_list = self._wb_sessions
-            else:
-                query = {"limit": "8"}
-                if student:
-                    query["student_id"] = student
-                sdata = self._get_json("/sessions", query=query, timeout=5)
-                self._sessions_list = sdata.get("items", [])
-
-            # 同步内存中的 session 状态（未读计数保留）
-            for s in self._sessions_list:
-                sid = s.get("session_id")
-                if sid and sid not in self._sessions:
-                    self._sessions[sid] = {"title": s.get("session_title") or "", "unread": 0}
-                elif sid and sid in self._sessions:
-                    self._sessions[sid]["title"] = s.get("session_title") or self._sessions[sid].get("title", "")
-
-            # 2) 拉取当前对话的分析
-            cur = self._current_session_id or ""
-            recent_query = {"limit": "20"}
-            if student:
-                recent_query["student_id"] = student
-            if cur:
-                recent_query["session_id"] = cur
+            query = {
+                "limit": str(SESSION_SELECTOR_LIMIT),
+                "student_id": student,
+            }
+            sdata = self._get_json("/sessions", query=query, timeout=5)
+            server_sessions = list(sdata.get("items", []) or [])
+            synced_session_ids = {
+                str(session.get("session_id"))
+                for session in server_sessions
+                if session.get("session_id")
+            }
+            recent_query = {"limit": "20", "student_id": student}
+            if current_session_id:
+                recent_query["session_id"] = current_session_id
             data = self._get_json("/recent", query=recent_query, timeout=5)
-            self._items = data.get("items", [])
+            reported_llm_status = (
+                capability_data.get("llm_status")
+                or data.get("llm_status")
+                or "unknown"
+            )
+            supported_llm_statuses = {
+                "ready",
+                "disabled",
+                "missing_api_key",
+                "misconfigured",
+                "timeout",
+                "upstream_error",
+                "unknown",
+            }
+            llm_status = str(reported_llm_status)
+            if llm_status not in supported_llm_statuses:
+                llm_status = "unknown"
+            llm_retry_guidance = str(
+                capability_data.get("retry_guidance")
+                or data.get("retry_guidance")
+                or (
+                    "当前服务版本未报告 LLM 配置状态，请确认服务配置后重试。"
+                    if llm_status == "unknown"
+                    else ""
+                )
+            ).strip()
+            result = {
+                "local_sessions": local_snapshot,
+                "local_inventory_signature": _session_inventory_signature(local_snapshot),
+                "synced_session_ids": synced_session_ids,
+                "items": list(data.get("items", []) or []),
+                "context_status": str(data.get("context_status") or (
+                    "ready"
+                    if not current_session_id or current_session_id in synced_session_ids
+                    else "not_synced"
+                )),
+                "llm_status": llm_status,
+                "llm_retry_guidance": llm_retry_guidance,
+                "current_session_id": current_session_id,
+            }
+            callback = CopilotNativeApp._apply_refresh_result.__get__(self, type(self))
+            AppHelper.callAfter(callback, generation, result)
+        except Exception as exc:
+            _record_recent_error("refresh_network", exc)
+            callback = CopilotNativeApp._apply_refresh_failure.__get__(self, type(self))
+            AppHelper.callAfter(callback, generation, type(exc).__name__, "")
 
-            # 当前对话未读清零
-            if cur and cur in self._sessions:
-                self._sessions[cur]["unread"] = 0
+    def _settle_refresh_generation(self, generation: int) -> bool:
+        current = int(getattr(self, "_refresh_request_generation", 0))
+        if generation == current:
+            self._refresh_inflight = False
+            self._refresh_pending = False
+            return True
 
+        self._refresh_inflight = False
+        pending = bool(getattr(self, "_refresh_pending", False))
+        self._refresh_pending = False
+        if pending:
+            CopilotNativeApp._refresh_data(self)
+        return False
+
+    def _apply_refresh_result(self, generation: int, result: dict[str, Any]):
+        """Apply one worker snapshot on the AppKit thread if it is still current."""
+        if not CopilotNativeApp._settle_refresh_generation(self, generation):
+            return
+        snapshot_session_id = str(result.get("current_session_id") or "")
+        live_session_id = str(getattr(self, "_current_session_id", "") or "")
+        if snapshot_session_id != live_session_id:
+            log.info(
+                "忽略过期对话刷新: snapshot=%s current=%s",
+                (snapshot_session_id or "?")[:8],
+                (live_session_id or "?")[:8],
+            )
+            return
+        self._service_available = True
+        self._synced_session_ids = set(result.get("synced_session_ids", set()) or set())
+        worker_local_sessions = list(result.get("local_sessions", []) or [])
+        worker_local_signature = tuple(result.get("local_inventory_signature", ()) or ())
+        latest_local_sessions = _sort_sessions_for_selector(
+            list(getattr(self, "_wb_sessions", []) or [])
+        )
+        latest_local_signature = _session_inventory_signature(latest_local_sessions)
+        self._sessions_list = (
+            latest_local_sessions
+            if latest_local_signature != worker_local_signature
+            else worker_local_sessions
+        )
+        self._items = list(result.get("items", []) or [])
+        self._context_status = str(result.get("context_status") or "ready")
+        self._llm_status = str(result.get("llm_status") or "unknown")
+        self._llm_retry_guidance = str(result.get("llm_retry_guidance") or "")
+
+        sessions_state = getattr(self, "_sessions", {})
+        for session in self._sessions_list:
+            sid = session.get("session_id")
+            if sid and sid not in sessions_state:
+                sessions_state[sid] = {
+                    "title": session.get("session_title") or "",
+                    "unread": 0,
+                }
+            elif sid:
+                sessions_state[sid]["title"] = (
+                    session.get("session_title") or sessions_state[sid].get("title", "")
+                )
+        self._sessions = sessions_state
+        current_session_id = str(result.get("current_session_id") or "")
+        if current_session_id and current_session_id in self._sessions:
+            self._sessions[current_session_id]["unread"] = 0
+
+        if _session_selector_render_signature(
+            self._sessions_list,
+            self._sessions,
+            getattr(self, "_current_session_id", None),
+        ) != tuple(getattr(self, "_rendered_session_signature", ()) or ()):
             try:
                 self._rebuild_session_bar()
             except Exception:
                 log.exception("重建会话切换栏失败")
-            try:
-                self._rebuild_cards()
-            except Exception:
-                log.exception("重建分析卡片失败")
-            self._update_icon_state()
-            log.info("_refresh_data 完成: sessions=%d, items=%d, current=%s",
-                     len(self._sessions_list), len(self._items),
-                     (self._current_session_id or "?")[:8])
-        except Exception as e:
-            import traceback
-            log.error("拉取数据失败: %s\n%s", e, traceback.format_exc())
+        try:
+            self._rebuild_cards()
+        except Exception:
+            log.exception("重建分析卡片失败")
+        self._update_icon_state()
+        log.info(
+            "_refresh_data 完成: sessions=%d, items=%d, current=%s",
+            len(self._sessions_list),
+            len(self._items),
+            (current_session_id or "?")[:8],
+        )
+
+    def _apply_refresh_failure(
+        self,
+        generation: int,
+        error_message: str,
+        traceback_text: str = "",
+    ):
+        if not CopilotNativeApp._settle_refresh_generation(self, generation):
+            return
+        self._service_available = False
+        self._context_status = "service_unavailable"
+        self._items = []
+        log.error("拉取数据失败 type=%s", error_message)
+        try:
+            self._rebuild_cards()
+        except Exception:
+            log.exception("显示服务不可用状态失败")
 
     def _rebuild_session_bar(self):
-        """重建顶部对话切换栏。"""
+        """重建完整下拉选择器和同源的最近 3 个快捷项。"""
         for sub in list(self.session_bar.subviews()):
             sub.removeFromSuperview()
 
         bar_w = self.session_bar.frame().size.width
         bar_h = self.session_bar.frame().size.height
-        sessions = self._sessions_list[:4]  # 最多显示 4 个
-        n = len(sessions)
-        if n == 0:
+        sessions = _sort_sessions_for_selector(list(self._sessions_list))
+        self._sessions_list = sessions
+        self._session_popup_ids = [str(item.get("session_id")) for item in sessions]
+        self._recent_session_ids = self._session_popup_ids[:3]
+        self._recent_session_buttons = []
+        if not sessions:
             label = NSTextField.alloc().initWithFrame_(NSMakeRect(8, (bar_h - 16) / 2, bar_w - 16, 16))
             label.setStringValue_("暂无对话记录，在 WorkBuddy 中对话试试")
             label.setEditable_(False)
@@ -961,9 +1430,34 @@ class CopilotNativeApp(NSObject):
             label.setFont_(NSFont.systemFontOfSize_(11))
             label.setTextColor_(_panel_secondary_text_color())
             self.session_bar.addSubview_(label)
+            self._rendered_session_signature = _session_selector_render_signature(
+                sessions,
+                getattr(self, "_sessions", {}),
+                getattr(self, "_current_session_id", None),
+            )
             return
 
+        self.session_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(6, bar_h - 34, bar_w - 12, 28), False
+        )
+        self.session_popup.setTarget_(self)
+        self.session_popup.setAction_("sessionDropdownChanged:")
+        for session in sessions:
+            sid = str(session.get("session_id") or "")
+            title = str(session.get("session_title") or session.get("title") or sid[:8] or "?")
+            group_type = str(session.get("group_type") or "")
+            if group_type == "task":
+                group_label = "任务"
+            elif group_type == "space":
+                group_label = "空间"
+            else:
+                group_label = "其他"
+            self.session_popup.addItemWithTitle_(f"{group_label} · {title}")
+        self.session_bar.addSubview_(self.session_popup)
+
         gap = 6.0
+        recent_sessions = sessions[:3]
+        n = len(recent_sessions)
         btn_w = (bar_w - gap * (n - 1)) / n
         # 查 WorkBuddy 当前激活的对话（用于在切换栏标记）
         active_sid = None
@@ -971,7 +1465,7 @@ class CopilotNativeApp(NSObject):
             if s.get("is_active"):
                 active_sid = s.get("session_id")
                 break
-        for i, s in enumerate(sessions):
+        for i, s in enumerate(recent_sessions):
             sid = s.get("session_id")
             title = s.get("session_title") or (sid[:8] if sid else "?")
             # 截断长标题
@@ -988,7 +1482,7 @@ class CopilotNativeApp(NSObject):
                 label_text = f"{prefix}{title} ({unread})"
 
             btn = NSButton.alloc().initWithFrame_(
-                NSMakeRect(i * (btn_w + gap), 4, btn_w, bar_h - 8)
+                NSMakeRect(i * (btn_w + gap), 4, btn_w, 26)
             )
             btn.setTitle_(label_text)
             btn.setTarget_(self)
@@ -1013,15 +1507,79 @@ class CopilotNativeApp(NSObject):
                 title_color = _panel_secondary_text_color()
             _set_button_title(btn, label_text, title_color)
             self.session_bar.addSubview_(btn)
+            self._recent_session_buttons.append(btn)
+        self._sync_session_controls()
+        self._rendered_session_signature = _session_selector_render_signature(
+            sessions,
+            getattr(self, "_sessions", {}),
+            getattr(self, "_current_session_id", None),
+        )
+
+    def _sync_session_controls(self):
+        current = self._current_session_id
+        if hasattr(self, "session_popup") and current in getattr(self, "_session_popup_ids", []):
+            self.session_popup.selectItemAtIndex_(self._session_popup_ids.index(current))
+        active_sid = next(
+            (
+                str(session.get("session_id") or "")
+                for session in getattr(self, "_sessions_list", [])
+                if session.get("is_active")
+            ),
+            "",
+        )
+        recent_ids = list(getattr(self, "_recent_session_ids", []) or [])
+        for index, button in enumerate(
+            getattr(self, "_recent_session_buttons", []) or []
+        ):
+            if index >= len(recent_ids):
+                break
+            sid = recent_ids[index]
+            is_current = sid == current
+            is_active_wb = sid == active_sid
+            button.setState_(NSControlStateValueOn if is_current else 0)
+            if is_current:
+                background = NSColor.colorWithRed_green_blue_alpha_(
+                    0.23, 0.51, 0.96, 0.42
+                )
+                title_color = _panel_heading_text_color()
+            elif is_active_wb:
+                background = NSColor.colorWithRed_green_blue_alpha_(
+                    0.23, 0.51, 0.96, 0.18
+                )
+                title_color = _panel_text_color()
+            else:
+                background = NSColor.clearColor()
+                title_color = _panel_secondary_text_color()
+            button.layer().setBackgroundColor_(background.CGColor())
+            _set_button_title(button, str(button.title()), title_color)
+
+    def _select_session(self, session_id: str | None):
+        if not session_id:
+            return
+        selected = str(session_id)
+        if selected != getattr(self, "_current_session_id", None):
+            # 使已发出请求的展示令牌失效；网络请求仍收尾并恢复控件。
+            self._ask_generation = int(getattr(self, "_ask_generation", 0)) + 1
+        self._current_session_id = selected
+        log.info("切换对话: %s", session_id)
+        self._sync_session_controls()
+        self._rendered_session_signature = _session_selector_render_signature(
+            list(getattr(self, "_sessions_list", []) or []),
+            getattr(self, "_sessions", {}),
+            self._current_session_id,
+        )
+        self._refresh_data()
+
+    def sessionDropdownChanged_(self, sender):
+        idx = int(sender.indexOfSelectedItem())
+        if 0 <= idx < len(self._session_popup_ids):
+            self._select_session(self._session_popup_ids[idx])
 
     def sessionButtonClicked_(self, sender):
-        """点击对话切换按钮。"""
+        """点击最近对话快捷项。"""
         idx = int(sender.tag())
-        if 0 <= idx < len(self._sessions_list):
-            sid = self._sessions_list[idx].get("session_id")
-            self._current_session_id = sid
-            log.info("切换对话: %s", sid)
-            self._refresh_data()
+        if 0 <= idx < len(self._recent_session_ids):
+            self._select_session(self._recent_session_ids[idx])
 
     def _add_panel_card(self, x, y, w, h, marker_color, attributed_text):
         """Create a dark card surface with a severity marker and transparent text."""
@@ -1056,27 +1614,90 @@ class CopilotNativeApp(NSObject):
         """重建分析卡片（增强：诊断 + 建议 + 严重程度）。"""
         for sub in list(self.card_container.subviews()):
             sub.removeFromSuperview()
+        self.sync_then_ask_button = None
+        self.ask_without_context_button = None
 
         card_w = self.card_container.frame().size.width - 16  # 左右各 8 边距
 
+        service_unavailable = not bool(getattr(self, "_service_available", True))
+        analysis_items = [] if service_unavailable else list(self._items)
+        # 导师消息已经渲染并 ACK，不隶属于本次分析刷新，服务失联时仍必须保留。
         items = sorted(
-            list(self._items) + list(self._mentor_items),
+            analysis_items + list(self._mentor_items),
             key=lambda item: item.get("created_at") or item.get("timestamp") or 0,
         )
 
-        if not items:
-            label = NSTextField.alloc().initWithFrame_(NSMakeRect(12, 200, card_w, 30))
-            label.setStringValue_("(当前对话暂无分析记录)")
-            label.setEditable_(False)
-            label.setBezeled_(False)
-            label.setDrawsBackground_(False)
-            label.setFont_(NSFont.systemFontOfSize_(12))
-            label.setTextColor_(_panel_secondary_text_color())
-            self.card_container.addSubview_(label)
-            self.card_container.setFrameSize_(NSMakeSize(self.card_container.frame().size.width, 240))
-            return
+        empty_analysis_state: str | None = None
+        if not analysis_items:
+            empty_analysis_state = _analysis_empty_state(
+                list(getattr(self, "_wb_sessions", []) or []),
+                getattr(self, "_current_session_id", None),
+                set(getattr(self, "_synced_session_ids", set()) or set()),
+                bool(getattr(self, "_service_available", True)),
+                str(getattr(self, "_llm_status", "unknown") or "unknown"),
+            )
+            if getattr(self, "_context_status", "") == "not_synced":
+                empty_analysis_state = "not_synced"
 
         y_offset = 4.0
+        if empty_analysis_state:
+            state_titles = {
+                "no_local_sessions": "暂无本地对话",
+                "not_synced": "当前对话未同步",
+                "synced_no_analysis": "当前对话待分析",
+                "service_unavailable": "Copilot 服务不可用",
+                "llm_unavailable": "LLM 暂不可用",
+            }
+            state_kind = "alert" if empty_analysis_state == "service_unavailable" else "heading"
+            state_lines = [
+                (state_titles.get(empty_analysis_state, "Copilot 状态"), state_kind),
+                (_empty_state_message(empty_analysis_state), "body"),
+            ]
+            if empty_analysis_state == "llm_unavailable":
+                llm_status = str(getattr(self, "_llm_status", "unknown") or "unknown")
+                if llm_status == "unknown":
+                    state_lines[1] = (
+                        "Copilot 已连接，但当前服务未报告 LLM 配置状态。",
+                        "body",
+                    )
+                retry_guidance = str(
+                    getattr(self, "_llm_retry_guidance", "") or ""
+                ).strip()
+                if retry_guidance:
+                    state_lines.append((retry_guidance, "secondary"))
+            state_card_h = 88.0 if len(state_lines) > 2 else 72.0
+            self._add_panel_card(
+                8,
+                y_offset,
+                card_w,
+                state_card_h,
+                _panel_marker_color(
+                    "error" if empty_analysis_state == "service_unavailable" else "info"
+                ),
+                _attributed_panel_lines(state_lines),
+            )
+            y_offset += state_card_h + 8
+            if empty_analysis_state == "not_synced":
+                self.sync_then_ask_button = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(8, y_offset, 164, 30)
+                )
+                self.sync_then_ask_button.setTitle_("同步最近内容并提问")
+                self.sync_then_ask_button.setTarget_(self)
+                self.sync_then_ask_button.setAction_("syncThenAskClicked:")
+                self.card_container.addSubview_(self.sync_then_ask_button)
+
+                self.ask_without_context_button = NSButton.alloc().initWithFrame_(
+                    NSMakeRect(180, y_offset, 164, 30)
+                )
+                self.ask_without_context_button.setTitle_("不带对话上下文提问")
+                self.ask_without_context_button.setTarget_(self)
+                self.ask_without_context_button.setAction_("askWithoutContextClicked:")
+                self.card_container.addSubview_(self.ask_without_context_button)
+                y_offset += 38
+            CopilotNativeApp._set_ask_controls_enabled(
+                self,
+                getattr(self, "_ask_inflight_generation", None) is None,
+            )
         for item in reversed(items):  # 时间正序：旧→新，从下往上排
             if item.get("type") == "mentor_message":
                 text = item.get("text", "")
@@ -1193,13 +1814,20 @@ class CopilotNativeApp(NSObject):
     # ── WebSocket 客户端 ──
 
     def _start_ws_thread(self):
+        if not str(getattr(self, "_student_id", "") or ""):
+            log.warning("缺少 student_id，不启动学员 WebSocket 连接")
+            return False
+
         def _run():
             asyncio.run(self._ws_loop())
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
+        return True
 
     async def _ws_loop(self):
+        if not str(getattr(self, "_student_id", "") or ""):
+            return
         self._ws_asyncio_loop = asyncio.get_running_loop()
         backoff = 1
         while True:
@@ -1258,6 +1886,12 @@ class CopilotNativeApp(NSObject):
             # hook 只在用户当前对话里触发 → 这就是当前对话
             # 面板不可见时自动跟随；面板可见时若不是当前查看的对话则标记未读
             if not self._panel_visible:
+                if session_id != self._current_session_id:
+                    # Invalidate a refresh snapshot captured for the prior
+                    # session even though the hidden panel does not refresh now.
+                    self._refresh_request_generation = int(
+                        getattr(self, "_refresh_request_generation", 0)
+                    ) + 1
                 self._current_session_id = session_id
             elif session_id != self._current_session_id:
                 self._sessions[session_id]["unread"] = self._sessions[session_id].get("unread", 0) + 1
@@ -1773,7 +2407,8 @@ class CopilotNativeApp(NSObject):
                 self.analysis_panel.makeFirstResponder_(None)
             except Exception:
                 pass
-            self.analysis_panel.setAllowsKeyboardFocus_(False)
+            # 回答需要继续可选择，不在返回后关闭面板键盘焦点。
+            self.analysis_panel.setAllowsKeyboardFocus_(True)
 
     def _set_ask_answer_text(self, text: str):
         if hasattr(self, "ask_answer_view"):
@@ -1781,10 +2416,84 @@ class CopilotNativeApp(NSObject):
             self.ask_answer_view.setTextColor_(_panel_text_color())
             self.ask_answer_view.setString_(text)
 
+    def copyAnswerClicked_(self, sender):
+        text = ""
+        if hasattr(self, "ask_answer_view"):
+            text = str(self.ask_answer_view.string() or "")
+        if _copy_text_to_pasteboard(text):
+            log.info("Copilot 回答已复制")
+
+    def _diagnostics_enabled(self) -> bool:
+        if not hasattr(self, "diagnostics_checkbox"):
+            return True
+        return bool(self.diagnostics_checkbox.state())
+
+    def _question_from_input(self) -> str:
+        if not hasattr(self, "ask_input"):
+            return ""
+        return str(self.ask_input.stringValue() or "").strip()
+
+    def _set_ask_controls_enabled(self, enabled: bool):
+        for name in (
+            "ask_send_button",
+            "sync_then_ask_button",
+            "ask_without_context_button",
+        ):
+            control = getattr(self, name, None)
+            if control is not None:
+                control.setEnabled_(bool(enabled))
+
+    def _start_student_ask(
+        self,
+        question: str,
+        session_id: str | None,
+        *,
+        context_mode: str | None = None,
+        sync_first: bool = False,
+    ) -> bool:
+        if not str(getattr(self, "_student_id", "") or ""):
+            self._set_ask_answer_text("缺少 student_id，暂时不能发送问题。")
+            return False
+        if getattr(self, "_ask_inflight_generation", None) is not None:
+            self._set_ask_answer_text("上一个问题正在处理，请等它完成后再提问。")
+            return False
+
+        generation = int(getattr(self, "_ask_generation", 0)) + 1
+        self._ask_generation = generation
+        self._ask_inflight_generation = generation
+        request_session_id = str(getattr(self, "_current_session_id", "") or "") or None
+        self._set_ask_controls_enabled(False)
+        self._set_ask_answer_text("正在同步当前对话..." if sync_first else "思考中...")
+        include_diagnostics = self._diagnostics_enabled()
+        target = (
+            self._sync_then_send_student_ask_worker
+            if sync_first
+            else self._send_student_ask_worker
+        )
+        args = (
+            question,
+            session_id,
+            include_diagnostics,
+            generation,
+            request_session_id,
+        ) if sync_first else (
+            question,
+            session_id,
+            include_diagnostics,
+            context_mode,
+            generation,
+            request_session_id,
+        )
+        thread = threading.Thread(
+            target=target,
+            args=args,
+            daemon=True,
+        )
+        thread.start()
+        return True
+
     def sendAskClicked_(self, sender):
-        question = ""
-        if hasattr(self, "ask_input"):
-            question = str(self.ask_input.stringValue() or "").strip()
+        question = self._question_from_input()
         if not question:
             self._set_ask_answer_text("先输入你想问 Copilot 的问题。")
             self._begin_ask_focus()
@@ -1793,16 +2502,36 @@ class CopilotNativeApp(NSObject):
             self._set_ask_answer_text("缺少 student_id，暂时不能发送问题。")
             return
 
-        if hasattr(self, "ask_send_button"):
-            self.ask_send_button.setEnabled_(False)
-        self._set_ask_answer_text("思考中...")
         session_id = self._current_session_id or None
-        thread = threading.Thread(
-            target=self._send_student_ask_worker,
-            args=(question, session_id),
-            daemon=True,
+        self._start_student_ask(question, session_id)
+
+    def syncThenAskClicked_(self, sender):
+        question = self._question_from_input()
+        session_id = self._current_session_id or None
+        if not question:
+            self._set_ask_answer_text("先输入问题，再选择“同步最近内容并提问”。")
+            self._begin_ask_focus()
+            return
+        if not self._student_id or not session_id:
+            self._set_ask_answer_text("缺少学员或对话信息，暂时不能同步。")
+            return
+        self._start_student_ask(
+            question,
+            session_id,
+            context_mode="sync_then_ask",
+            sync_first=True,
         )
-        thread.start()
+
+    def askWithoutContextClicked_(self, sender):
+        question = self._question_from_input()
+        if not question:
+            self._set_ask_answer_text("先输入问题，再选择“不带对话上下文提问”。")
+            self._begin_ask_focus()
+            return
+        if not self._student_id:
+            self._set_ask_answer_text("缺少 student_id，暂时不能发送问题。")
+            return
+        self._start_student_ask(question, None, context_mode="without_session")
 
     def _student_ask_timeout(self) -> int:
         try:
@@ -1811,40 +2540,158 @@ class CopilotNativeApp(NSObject):
             base = 30
         return max(base + 5, 10)
 
-    def _send_student_ask_worker(self, question: str, session_id: str | None):
+    def _sync_then_send_student_ask_worker(
+        self,
+        question: str,
+        session_id: str,
+        include_diagnostics: bool,
+        request_generation: int | None = None,
+        request_session_id: str | None = None,
+    ):
+        if not str(getattr(self, "_student_id", "") or ""):
+            callback_args: list[Any] = ["缺少 student_id，暂时不能同步或提问。"]
+            if request_generation is not None:
+                callback_args.extend([request_generation, request_session_id])
+            AppHelper.callAfter(self._handle_ask_error, *callback_args)
+            return
+        try:
+            result = wb_upload.upload_conversations(
+                self.cfg,
+                self._student_id,
+                "missing",
+                session_id=session_id,
+            )
+            if int(result.get("total") or 0) < 1 or int(result.get("failed") or 0) > 0:
+                raise RuntimeError("当前对话同步失败")
+        except Exception as exc:
+            _record_recent_error("sync_then_ask", exc)
+            log.warning(
+                "同步后提问失败 session=%s type=%s",
+                session_id,
+                type(exc).__name__,
+            )
+            callback_args: list[Any] = [
+                "当前对话同步失败，请稍后重试，或选择不带对话上下文提问。"
+            ]
+            if request_generation is not None:
+                callback_args.extend([request_generation, request_session_id])
+            AppHelper.callAfter(self._handle_ask_error, *callback_args)
+            return
+        worker_args: list[Any] = [
+            question,
+            session_id,
+            include_diagnostics,
+            "sync_then_ask",
+        ]
+        if request_generation is not None:
+            worker_args.extend([request_generation, request_session_id])
+        self._send_student_ask_worker(*worker_args)
+
+    def _send_student_ask_worker(
+        self,
+        question: str,
+        session_id: str | None,
+        include_diagnostics: bool = True,
+        context_mode: str | None = None,
+        request_generation: int | None = None,
+        request_session_id: str | None = None,
+    ):
+        if not str(getattr(self, "_student_id", "") or ""):
+            callback_args: list[Any] = ["缺少 student_id，暂时不能发送问题。"]
+            if request_generation is not None:
+                callback_args.extend([request_generation, request_session_id])
+            AppHelper.callAfter(self._handle_ask_error, *callback_args)
+            return
         payload: dict[str, Any] = {
             "student_id": self._student_id,
             "question": question,
+            "include_diagnostics": bool(include_diagnostics),
         }
         if session_id:
             payload["session_id"] = session_id
+        if context_mode:
+            payload["context_mode"] = context_mode
+        if include_diagnostics:
+            diagnostic_bundle = _collect_diagnostic_bundle()
+            if diagnostic_bundle:
+                payload["diagnostic_bundle"] = diagnostic_bundle
         try:
             data = self._post_json(
                 "/api/student/ask",
                 payload,
                 timeout=CopilotNativeApp._student_ask_timeout(self),
             )
-            answer = str(data.get("answer") or "Copilot 暂时没有返回答案。")
+            answer, context_status, llm_status = _format_student_ask_response(data)
             ask_id = int(data.get("ask_id") or 0)
-            AppHelper.callAfter(self._handle_ask_answer, question, answer, ask_id)
+            callback_args: list[Any] = [
+                question,
+                answer,
+                ask_id,
+                context_status,
+                llm_status,
+            ]
+            if request_generation is not None:
+                callback_args.extend([request_generation, request_session_id])
+            AppHelper.callAfter(self._handle_ask_answer, *callback_args)
         except Exception as exc:
-            log.debug("学员提问发送失败: %s", exc)
-            AppHelper.callAfter(
-                self._handle_ask_error,
-                "暂时没能连接 Copilot，请稍后再试，或把问题补充完整后重发。",
-            )
+            _record_recent_error("student_ask_http", exc)
+            log.debug("学员提问发送失败 type=%s", type(exc).__name__)
+            callback_args = ["暂时没能连接 Copilot，请稍后再试，或把问题补充完整后重发。"]
+            if request_generation is not None:
+                callback_args.extend([request_generation, request_session_id])
+            AppHelper.callAfter(self._handle_ask_error, *callback_args)
 
-    def _handle_ask_answer(self, question: str, answer: str, ask_id: int = 0):
-        if hasattr(self, "ask_send_button"):
-            self.ask_send_button.setEnabled_(True)
+    def _complete_ask_request(self, request_generation: int | None):
+        if request_generation is None:
+            self._set_ask_controls_enabled(True)
+            return
+        if getattr(self, "_ask_inflight_generation", None) == request_generation:
+            self._ask_inflight_generation = None
+            self._set_ask_controls_enabled(True)
+
+    def _handle_ask_answer(
+        self,
+        question: str,
+        answer: str,
+        ask_id: int = 0,
+        context_status: str = "ready",
+        llm_status: str = "unknown",
+        request_generation: int | None = None,
+        request_session_id: str | None = None,
+    ):
+        CopilotNativeApp._complete_ask_request(self, request_generation)
+        if request_generation is not None and (
+            request_generation != int(getattr(self, "_ask_generation", 0))
+            or request_session_id != (str(getattr(self, "_current_session_id", "") or "") or None)
+        ):
+            log.info("忽略已过期 Copilot 回答 generation=%s session=%s", request_generation, request_session_id)
+            return
         if hasattr(self, "ask_input"):
             self.ask_input.setStringValue_("")
+        self._service_available = True
+        self._context_status = context_status
+        self._llm_status = llm_status
         self._set_ask_answer_text(f"你问：{question}\n\nCopilot：{answer}")
+        if not getattr(self, "_items", []):
+            try:
+                self._rebuild_cards()
+            except Exception:
+                log.exception("更新 Copilot 状态卡片失败")
         self._end_ask_focus()
 
-    def _handle_ask_error(self, message: str):
-        if hasattr(self, "ask_send_button"):
-            self.ask_send_button.setEnabled_(True)
+    def _handle_ask_error(
+        self,
+        message: str,
+        request_generation: int | None = None,
+        request_session_id: str | None = None,
+    ):
+        CopilotNativeApp._complete_ask_request(self, request_generation)
+        if request_generation is not None and (
+            request_generation != int(getattr(self, "_ask_generation", 0))
+            or request_session_id != (str(getattr(self, "_current_session_id", "") or "") or None)
+        ):
+            log.info("忽略已过期 Copilot 错误 generation=%s session=%s", request_generation, request_session_id)
+            return
         self._set_ask_answer_text(message)
         self._end_ask_focus()
 

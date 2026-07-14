@@ -120,6 +120,7 @@ def install_api_routes(
     upload_statuses=None,
     upload_retry_statuses=None,
     upload_requests=None,
+    upload_post_snapshots=None,
 ):
     """拦截 /api/mentor/* 返回确定性 JSON。"""
     students = students or []
@@ -131,6 +132,7 @@ def install_api_routes(
     upload_statuses = upload_statuses if upload_statuses is not None else {}
     upload_retry_statuses = upload_retry_statuses if upload_retry_statuses is not None else {}
     upload_requests = upload_requests if upload_requests is not None else []
+    upload_post_snapshots = upload_post_snapshots if upload_post_snapshots is not None else {}
 
     def handler(route):
         path = urlparse(route.request.url).path
@@ -140,12 +142,15 @@ def install_api_routes(
             sid = unquote(path[len("/api/mentor/students/"):-len("/request-upload")])
             request_id = "req-" + sid
             upload_requests.append(path)
-            route.fulfill(json={"request_id": request_id, "status": "pending",
-                                "student_id": sid, "session_id": "",
-                                "transfer_status": "pending",
-                                "analysis_status": "not_requested",
-                                "transfer_error": "", "analysis_error": "",
-                                "result": None})
+            payload = upload_post_snapshots.get(sid, {
+                "request_id": request_id, "status": "pending",
+                "student_id": sid, "session_id": "",
+                "transfer_status": "pending",
+                "analysis_status": "not_requested",
+                "transfer_error": "", "analysis_error": "",
+                "result": None,
+            })
+            route.fulfill(json=payload)
         elif path.startswith("/api/mentor/upload-requests/") and path.endswith("/retry-analysis"):
             request_id = unquote(path[len("/api/mentor/upload-requests/"):-len("/retry-analysis")])
             upload_requests.append(path)
@@ -997,6 +1002,38 @@ def test_c_sync_button_requests_upload(page, static_server):
     feedback = page.locator("#sync-feedback")
     expect(feedback).to_be_visible()
     expect(feedback).to_contain_text("已请求同步")
+
+
+def test_sync_feedback_shows_offline_then_refreshes_when_student_connects(page, static_server):
+    students = [{"student_id": "s1", "display_name": "王佳梁",
+                 "last_severity": "info", "session_count": 0, "analysis_count": 0}]
+    offline = {
+        "request_id": "req-s1", "status": "pending", "student_id": "s1",
+        "session_id": "", "transfer_status": "pending",
+        "analysis_status": "not_requested", "transfer_error": "",
+        "analysis_error": "", "result": None, "student_online": False,
+    }
+    online = dict(offline, student_online=True)
+    open_console(
+        page,
+        static_server,
+        students=students,
+        sessions_by_student={"s1": []},
+        upload_post_snapshots={"s1": offline},
+        upload_statuses={"req-s1": [offline, online]},
+    )
+
+    page.locator(".student-item").first.click()
+    page.locator("#sync-student").click()
+    feedback = page.locator("#sync-feedback")
+
+    # 负控：若前端忽略 student_online=false，此精确离线文案断言必红。
+    expect(feedback).to_have_text(
+        "学员端未启动；同步请求已保存，客户端启动后将自动接收。"
+    )
+
+    # 持续轮询会读取瞬时在线态；学员端上线后恢复兼容的等待文案。
+    expect(feedback).to_have_text("已请求同步，等待学员端接收…", timeout=4000)
 
 
 def test_upload_status_ws_then_poll_failure_and_retry_only_analysis(page, static_server):

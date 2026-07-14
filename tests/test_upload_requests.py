@@ -118,7 +118,17 @@ def test_offline_upload_request_is_visible_to_student_and_can_complete(tmp_path)
             json={"mentor_id": "mentor-1", "session_id": "sess-a"},
         )
         assert requested.status_code == 200
+        assert requested.json()["student_online"] is False
+        assert requested.json()["transfer_status"] == "pending"
         request_id = requested.json()["request_id"]
+
+        mentor_snapshot = client.get(
+            f"/api/mentor/upload-requests/{request_id}",
+            headers=_mentor_headers(),
+        )
+        assert mentor_snapshot.status_code == 200
+        assert mentor_snapshot.json()["student_online"] is False
+        assert mentor_snapshot.json()["transfer_status"] == "pending"
 
         catchup = client.get(
             "/api/student/upload-requests?student_id=student-a",
@@ -171,6 +181,43 @@ def test_offline_upload_request_is_visible_to_student_and_can_complete(tmp_path)
     assert row["transfer_status"] == "stored"
     assert row["analysis_status"] == "not_requested"
     assert row["result_json"] == '{"total": 2, "synced": 2, "failed": 0}'
+
+
+def test_mentor_upload_snapshot_reflects_live_float_connection(tmp_path):
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send_text(self, text):
+            self.sent.append(json.loads(text))
+
+    app, _store = _build_app(tmp_path)
+    registry = app.state.context.ws_registry
+    student_socket = FakeWebSocket()
+    registry.register_float("student-a", student_socket)
+
+    with TestClient(app) as client:
+        requested = client.post(
+            "/api/mentor/students/student-a/request-upload",
+            headers=_mentor_headers(),
+            json={"mentor_id": "mentor-1"},
+        )
+        assert requested.status_code == 200
+        assert requested.json()["student_online"] is True
+        assert requested.json()["transfer_status"] == "pending"
+        request_id = requested.json()["request_id"]
+        assert [item["type"] for item in student_socket.sent] == ["mentor_command"]
+        assert student_socket.sent[0]["request_id"] == request_id
+
+        registry.unregister_float("student-a", student_socket)
+        disconnected = client.get(
+            f"/api/mentor/upload-requests/{request_id}",
+            headers=_mentor_headers(),
+        )
+
+    assert disconnected.status_code == 200
+    assert disconnected.json()["student_online"] is False
+    assert disconnected.json()["transfer_status"] == "pending"
 
 
 def test_upload_request_status_rejects_cross_student_update(tmp_path):
@@ -461,6 +508,7 @@ def test_mentor_get_upload_request_returns_both_axes_errors_and_result(tmp_path)
         "analysis_status": "failed",
         "transfer_error": "",
         "analysis_error": "LLM provider unavailable",
+        "student_online": False,
     }
     assert missing.status_code == 404
 
@@ -584,6 +632,13 @@ def test_upload_status_events_are_snapshots_sent_only_to_mentors(tmp_path):
 
     app, _store = _build_app(tmp_path)
     registry = app.state.context.ws_registry
+    captured_status_events = []
+
+    async def capture_status_event(payload):
+        if payload.get("type") == "upload_request_status":
+            captured_status_events.append(payload)
+
+    app.state.context.bus.subscribe(capture_status_event)
     mentor = FakeWebSocket()
     student_a = FakeWebSocket()
     student_b = FakeWebSocket()
@@ -596,6 +651,12 @@ def test_upload_status_events_are_snapshots_sent_only_to_mentors(tmp_path):
             "/api/mentor/students/student-a/request-upload",
             headers=_mentor_headers(),
         ).json()["request_id"]
+        running = client.post(
+            f"/api/student/upload-requests/{request_id}/status",
+            headers=_student_headers(),
+            json={"student_id": "student-a", "status": "running"},
+        )
+        registry.unregister_float("student-a", student_a)
         response = client.post(
             f"/api/student/upload-requests/{request_id}/status",
             headers=_student_headers(),
@@ -619,10 +680,13 @@ def test_upload_status_events_are_snapshots_sent_only_to_mentors(tmp_path):
             },
         )
 
+    assert running.status_code == 200
     assert response.status_code == 200
     status_events = [x for x in mentor.sent if x.get("type") == "upload_request_status"]
-    assert len(status_events) == 1
-    event = status_events[0]
+    assert [event["student_online"] for event in captured_status_events] == [True, False]
+    assert [event["student_online"] for event in status_events] == [True, False]
+    assert captured_status_events == status_events
+    event = status_events[-1]
     assert event["request_id"] == request_id
     assert event["student_id"] == "student-a"
     assert event["transfer_status"] == "failed"

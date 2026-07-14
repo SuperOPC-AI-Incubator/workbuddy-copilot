@@ -1,17 +1,17 @@
 # WorkBuddy Copilot — 目标架构设计（v3，跨平台学员端修订）
 
 > 定稿日期：2026-07-02
-> 修订日期：2026-07-12
-> 状态：目标架构重建已完成；本版锁定公网部署、鉴权、跨平台 Student Core、回执可靠性与测试前置要求
-> 依据：架构 review + 3 方案判官评审 + YAGNI/数据模型/通信安全三专家评审 + 用户 6 项拍板决策
+> 修订日期：2026-07-14
+> 状态：目标架构重建已完成；本版锁定公网部署、鉴权、跨平台 Student Core、回执可靠性、AI 助教上下文与测试前置要求
+> 依据：架构 review + 3 方案判官评审 + YAGNI/数据模型/通信安全三专家评审 + 用户后续拍板的产品决策
 
 ---
 
 ## 一、背景与目标
 
-为 Pioneers Learning Community (PLC) 构建学习 Copilot：监控学员与 WorkBuddy 的对话，LLM 分析学习状态，学员浮标实时呈现，导师浏览器观察台查看，**并支持导师异步发文字提示到学员浮标**。真实规模 45 学生 × 17-18 导师，近期采用**公网服务器**连接，避免依赖局域网互通。
+为 Pioneers Learning Community (PLC) 构建学习 Copilot：监控学员与 WorkBuddy 的对话，LLM 分析学习状态，学员浮标实时呈现，导师浏览器观察台查看，**并支持导师异步发文字提示到学员浮标**。最终要让每位学员在使用 WorkBuddy Agents 时都有一个持续在场的 AI 助教：结合真实错误、本机能力和营地最佳实践解决技术卡点，并对提问、调研、收敛与验证方式给出适时建议；同时让导师看清学员与 AI 协作的过程和阻塞，用于更有针对性的人工干预。真实规模 45 学生 × 17-18 导师，近期采用**公网服务器**连接，避免依赖局域网互通。
 
-### 用户拍板的 6 项决策（本设计硬约束）
+### 用户已拍板的产品与架构决策（本设计硬约束）
 
 | # | 决策 | 影响 |
 |---|------|------|
@@ -27,6 +27,10 @@
 | D10 | **学员端定位为技术助教浮标** | 学员可主动提问；系统可低频提醒低效对话模式；UI 不做复杂 tab |
 | D11 | **过程提醒提示词可持续更新** | 当前由配置/管理员更新；架构预留未来导师端更新全员提示词，不做 per-student 策略 |
 | D12 | **当前会话自动跟随只服务学员端** | 浮标本地检测 WorkBuddy 当前会话并自动切换；导师台暂不显示“学员当前正在看哪个会话” |
+| D13 | **学员提问默认附加诊断信息，且必须先脱敏** | Student Core 组装有界、可版本化的 `DiagnosticBundle`；Hook 不做系统探测；界面允许取消勾选 |
+| D14 | **助教上下文可解释，不宣称载入全部对话** | 服务端按五层合并且按消息边界裁剪；返回实际的对话、诊断和 guidance 使用状态 |
+| D15 | **本机未同步会话不伪造服务端上下文** | 学员可选 `sync_then_ask` 或 `without_session`；前者先同步最近内容，后者明确不带会话提问 |
+| D16 | **LLM 可用性与营地指导上下文必须可观测** | 区分未启用、凭据缺失、上游不可用等 capability；guidance 可版本化、运行时选择并记录实际版本 |
 
 ### 架构定性（纠正）
 
@@ -98,7 +102,7 @@
 | Service | services.py | 业务编排，无 I/O 细节，可被路由/后台任务复用 | 事件走 EventBus；不含 HTTP |
 | 事件/推送 | eventbus.py, **connections.py（新增 WSRegistry）** | 进程内单向 pub/sub + 按 student_id 寻址扇出 | EventBus 不做对称双向 |
 | Repository | store.py | copilot.db 唯一读写 | 只做单库读写，不越层、不猜路径、不读 workbuddy.db |
-| 学员共享核心 | student_core/{spool,transport,coordinator,agent}.py | 本地事件、HTTP/WS、重连、去重、持久回执 | 不 import WorkBuddy、AppKit、Foundation、objc 或 fcntl |
+| 学员共享核心 | student_core/{spool,transport,coordinator,agent,diagnostics}.py | 本地事件、HTTP/WS、重连、去重、持久回执；提问时组装有界且脱敏的 `DiagnosticBundle` | 不 import WorkBuddy、AppKit、Foundation、objc 或 fcntl；不采集环境变量值和任意文件内容 |
 | 平台适配 | student_platform/{macos,windows,workbuddy}.py | 把显式已知本机数据目录交给共享 reader | 不把本机路径/文件读取迁移到服务端；Windows 必须先过 W0 |
 
 ### EventBus 方向性（关键）
@@ -126,8 +130,9 @@
 | **mentor_messages（新）** | 反向消息（D2）| id, student_id, mentor_id, session_id, text, message_id, created_at, delivered_at, read_at（预留）；FK→students |
 | **upload_requests（新增/已实现需补强）** | 导师触发全量同步的命令与状态 | request_id, student_id, mentor_id, session_id, status(pending/running/done/failed), error_message, created_at, updated_at；浮标离线后可补拉 |
 | **messages（新增/已实现需补强）** | 全量上传后的逐轮对话内容 | 只保存客户端过滤后的 message 行；工具输出不上传；重传按 sha 幂等 |
-| **student_asks（已实现需纳入架构）** | 学员主动问技术助教的问答记录 | student_id, session_id, question, answer, created_at；上下文来自当前会话 raw/messages 或最近 analyses |
-| **prompt_configs（建议新增）** | 可更新的过程提醒提示词 | key, version, content, updated_by, updated_at；当前可由配置/管理脚本更新，未来导师端全员更新复用该表 |
+| **student_asks（已实现需纳入架构）** | 学员主动问技术助教的问答记录 | student_id, session_id, question, answer, created_at；同时持久化 `context_status`、`diagnostics_attached/diagnostics_version/diagnostics_summary`、`guidance_versions` 与 `llm_status`。`diagnostics_version` 仅保存已验证的 bundle `schema_version`；不持久化原始诊断包 |
+| **prompt_configs（已实现）** | 分析服务的过程提醒 | 本期只支持 `process_reminder` 的 key/prompt/updated_by/时间戳，不宣称已支持学员问答 guidance 的 version/enabled 选择 |
+| **guidance 管理（未来）** | 技术排障与 AI 协作指导 | 待管理界面实现时再扩展 Store 合同；本期运行时只读取 config 中的 version/enabled/text |
 
 ### severity 语义修复（真 bug）
 现状 `MAX(severity)` 取字典序（error<info<warn），**error 被吞**、有 error 的会话可能显示绿灯。拆两语义：
@@ -173,9 +178,11 @@
 
 ### 浮标面板信息架构
 学员端不做复杂功能 tab。面板分三块：
-1. **顶部：当前对话 / 最近对话切换**。这是会话切换，不是功能 tab。最多展示少量最近会话，并标记 WorkBuddy 当前激活会话。
+1. **顶部：完整对话下拉框 + 最近 3 个快捷项**。这是会话切换，不是功能 tab。两处共用同一有序数据和同一选中状态：任一位置切换后另一处立即同步。排序与 WorkBuddy 一致：任务在前、工作空间在后，组内按最后问答/活动时间倒序；快捷项取该列表的前 3 项。
 2. **主体：当前建议 + 导师提示**。展示当前会话最近的学习诊断、可优化提醒、导师提示。提醒必须短、轻、少。
-3. **底部：向技术助教提问**。学员输入问题，服务端结合当前会话上下文回答。
+3. **底部：向技术助教提问**。学员输入问题，“附加诊断信息”默认选中且可取消；回答文本保持可选中，并提供明确的复制操作。
+
+空状态不再统一显示“当前对话暂无分析记录”，必须区分：本机没有对话、所选对话未同步、已同步但尚无分析、服务不可达、LLM 不可用。
 
 ### 当前会话自动跟随
 浮标客户端负责本地检测 WorkBuddy 当前会话，并默认把面板切到当前会话。该能力只影响学员端体验，不要求同步到导师台展示。规则：
@@ -184,20 +191,51 @@
 - 面板重新打开或学员点击当前会话按钮时，回到 WorkBuddy 当前会话。
 
 ### 技术助教问答
-`/api/student/ask` 使用当前 `student_id + session_id` 查上下文。优先顺序：
-1. 当前会话 raw_transcript / messages。
-2. 当前会话最近 analyses。
-3. 该学员最近 analyses。
-LLM 失败时返回固定降级回答，并记录失败日志；不能阻塞浮标。
+`/api/student/ask` 使用 `student_id + session_id + context_mode` 组装上下文。服务端严格按以下五层组合，每层独立有界，对话只能按完整消息边界裁剪，不能在字符中间截断后宣称是“全部对话”：
+
+1. **所选会话的最近有效消息**：服务端已入库的 `messages/raw_transcripts`，只取完整消息。
+2. **所选会话的最近分析**：用于补充已识别的阻塞、建议和风险。
+3. **该学员最近的 Copilot asks**：保留连续追问所需的少量问答，不混入其他学员。
+4. **本次 `DiagnosticBundle`**：仅当 `include_diagnostics=true` 且结构、版本、大小合法时加入。
+5. **运行时 guidance**：当前启用版本的技术排障知识和 AI 协作最佳实践。
+
+字符预算不按“后加入的内容优先”截取，而是按上述层级优先级选择完整 block：当前 session 消息最高，然后是当前分析、近期 asks、诊断、guidance。同层优先最新内容，任何消息都不从中间切断。
+
+所选会话仅存在学员本机时，服务端返回 `context_status=not_synced`，不回退到不明来源的其他会话。客户端提供两个显式模式：
+
+- `sync_then_ask`：先上传所选会话的最近内容，服务端确认后再提问。
+- `without_session`：明确不带对话上下文，仍可按用户选择带入脱敏诊断和 guidance。
+
+### 诊断信息责任边界
+
+`DiagnosticBundle` 由 Student Core 在学员发起提问时组装，不由 Hook 采集。正式合同字段仅使用 `schema_version=diagnostic-bundle/v1`；服务端对缺失或不支持的版本不附加、不入 LLM 上下文、不伪记为 v1。版本正确也不等于可信：服务端按 `system/versions/environment/proxy/tools/paths/permissions/reachability/recent_errors/truncated` 严格白名单重建 bundle，未知类别和未知字段直接丢弃，且所有保留字段必须通过类型、状态枚举、条目数、单条长度和总体积约束。当前 MVP 允许默认选中以优先功能与体验，但发送前仍必须完成基础脱敏：
+
+- 保留错误类型、发生时间、所属组件、脱敏消息、有界堆栈尾部与 capability 状态。
+- 工具/运行时、必要目录/配置、权限、代理与目标服务可达性仅报告结构化状态和脱敏摘要。
+- 环境变量只报告“是否已配置”，永不报告值；密钥、token、Authorization（包括 Basic、Bearer、AWS4 等多段认证值）、用户主目录和邮箱等使用占位符。
+- 不上传完整环境、任意文件内容、浏览器历史或无关用户数据。
+
+Student Core 无参数采集默认就应包含 OS/架构、Python/Copilot 版本、`python3/git` 存在性、WorkBuddy DB/projects 等关键路径的 exists/readable、基础读写权限、代理是否配置，以及明确的 `loopback/upstream=not_probed`。进程内有界错误环保留 component/time/type/脱敏 message/stack tail。每个默认本地探针独立隔离：任一 platform、版本、`Path.home/cwd`、路径或权限检查异常时，只把该事实降级为 `unknown/probe_error`，不中断整个采集，也不携带异常详情。默认采集不发起任何外网请求。
+
+会话原文也不能用“字符数小于上限”推断为完整。Store 必须在 SQLite 查询层用 `substr` 只返回有界尾部和必要元数据，禁止先 `SELECT *` 将全量 `content` 载入进程再截断。服务端只解析可以由换行边界证明完整的 JSONL 行，同时丢弃被字节截断的头部和没有结束换行的尾部；解析失败时不再把纯文本片段降级塞进 LLM 上下文。
+
+`POST /api/student/ask` 同时限制请求体总字节、`student_id/session_id/question` 字段长度、诊断序列化字节与节点数。服务在路由解析前对 Content-Length 和实际流量同时计数，因此缺失/伪造 Content-Length 或 chunked 传输也不能绕过上限；超限请求不得进入 LLM 或 Store。
+
+服务端验证合同后才把诊断加入 LLM 上下文，并在 `student_asks` 中保存实际使用的脱敏摘要与版本。未勾选时不上传、不入上下文，并持久化 `diagnostics_attached=false`。
+
+### LLM capability 与降级
+
+服务端在每次学员问答响应中暴露结构化 `llm_status`，合同固定为 `ready | disabled | missing_api_key | misconfigured | timeout | upstream_error`，不再统一显示“LLM 未启动”。响应返回对应的可执行自检/重试建议，并记录 `llm_status`。`api_base` 必须是带 host 的 `http/https` URL，非 URL、缺 host 或其他 scheme 在调用上游前就归类为 `misconfigured`。LLM 本身不可用时，降级建议必须来自确定性能力判断，不能再调用同一 LLM “诊断自己”。`context_status` 合同固定为 `ready | not_synced | without_session | no_context`。
 
 ### 过程提醒与提示词配置
 过程提醒用于发现低效学习/对话模式，例如反复试错、上下文描述不清、未经验证直接让 AI 改代码、偏离目标、长时间卡在同类错误上。它不是聊天回复，而是轻量提示。
 
 提醒策略由可更新提示词控制：
-- 当前版本：从配置或 `prompt_configs` 读取全局 `process_reminder_prompt`。
+- 当前版本：分析过程提醒可从 config 或 `prompt_configs.process_reminder` 读取；学员问答的技术排障 / AI 协作 guidance **仅从 config** 读取 version/enabled/text。
 - 更新方式：管理员/开发者可更新；立即影响后续分析，不要求重跑历史。
 - 未来扩展：导师端可编辑全员生效提示词；仍不做单导师/单学员差异化策略。
 - 防打扰：提醒输出必须有节流规则，例如同会话短时间内不重复提醒同一类问题；低置信度不提示。
+- 可追溯：本期 `student_asks.guidance_versions` 记录学员问答实际应用版本；导师诊断复用同一知识源与版本追溯属后续扩展，不宣称本期已实现。
 
 ---
 
@@ -207,6 +245,7 @@ LLM 失败时返回固定降级回答，并记录失败日志；不能阻塞浮�
 - **跨机 transcript（头号阻断的解法）**：hook 用 **stdlib 读 transcript 文件尾部原始字节**（按字节封顶，如末 256KB）写入兼容 `EventSpool` 的本地 JSON envelope；常驻 `Student Core` 再将其 POST 到 `/report`。服务器 `parse_text(content)` 集中解析，绝不碰学员机 FS。
   - hook 保持 **stdlib-only 零依赖 + fire-and-forget**：尾读用内建 open/seek，本地落盘采用临时文件+原子 replace；不联网、不上传本地路径。若读取或落盘失败，try/except 降级且**始终 return 0**，绝不拖垮 WorkBuddy。
   - 完整对话读取属于学员端显式 `WorkBuddyDataAdapter` 的职责；服务器只处理已上报内容。实时 tail 与完整归档/分析用途分开，不能以服务端文件读取替代。
+  - 系统、权限、工具、网络和错误环形等诊断只由常驻 Student Core 在学员提问时按需探测；不得为了自动诊断把系统探测、网络请求或第三方依赖塞进 Hook。
 - **时序修复**：Stop 的 30s LLM 改 `BackgroundTask` 异步执行，/report 立即返回 **202**（hook 自身 urlopen 超时 5s、WorkBuddy 注册超时 30s 都不再被 LLM 阻塞）。加小 `asyncio.Semaphore` 限 LLM 并发。
 - **认证（公网 MVP）**：从单一共享 token 升级为**双角色 token**：`student_token` 用于 hook/浮标/学员上传；`mentor_token` 用于导师台/导师 API/导师 WS。前端导师台首次打开时输入 mentor token，保存在浏览器 sessionStorage，并在 fetch Authorization 与 WS query 中携带。空 token 只允许本地开发，不允许公网启动。
 - **config 分发**：学员机配置必须写入公网 service URL、student_id、student_token。导师 token 不下发到学员机。install/register_hook 脚本必须支持通过 env 或参数写入这些配置。
@@ -231,7 +270,7 @@ LLM 失败时返回固定降级回答，并记录失败日志；不能阻塞浮�
 
 ## 九、明确不做（MVP 边界，避免过度设计）
 
-对称双向总线、Redis/MQ broker、多 worker、字段级脱敏/at-rest 加密/E2E、前端框架、导师-学员可见性关系表（D4 全量广播）、复杂重试队列/死信/断路器、Windows **正式 rollout/UI**、Cursor/Claude-Code 适配器（第二 Agent 框架真来了再加，属扩展点非转折点）。
+对称双向总线、Redis/MQ broker、多 worker、全面字段级合规策略/at-rest 加密/E2E、前端框架、导师-学员可见性关系表（D4 全量广播）、复杂重试队列/死信/断路器、Windows **正式 rollout/UI**、Cursor/Claude-Code 适配器（第二 Agent 框架真来了再加，属扩展点非转折点）。`DiagnosticBundle` 的基础密钥/身份脱敏属于当前 MVP 功能正确性，不在本“不做”列表中。
 
 Windows 的平台无关 Core 和受 W0 证据门控的探测/数据绑定已实现；这不是对 Windows WorkBuddy 私有路径、Hook 配置或实机行为的支持承诺。相关事实必须由 W0 真机采集后再进入 W1 适配与 P3 发布门。
 

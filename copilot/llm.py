@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -24,6 +25,40 @@ class AnalysisOutcome:
     ok: bool
     value: dict[str, Any]
     error: str | None = None
+
+
+QuestionLLMStatus = Literal[
+    "ready",
+    "disabled",
+    "missing_api_key",
+    "misconfigured",
+    "timeout",
+    "upstream_error",
+]
+
+QuestionCapabilityStatus = Literal[
+    "ready",
+    "disabled",
+    "missing_api_key",
+    "misconfigured",
+]
+
+
+@dataclass(frozen=True)
+class QuestionAnswerOutcome:
+    """A student answer plus a stable, UI-safe provider capability state."""
+
+    status: QuestionLLMStatus
+    answer: str
+    retry_guidance: str = ""
+
+
+@dataclass(frozen=True)
+class QuestionCapability:
+    """Deterministic local preflight result; it never contacts the provider."""
+
+    status: QuestionCapabilityStatus
+    retry_guidance: str = ""
 
 
 def coerce_analysis_outcome(value: AnalysisOutcome | dict[str, Any]) -> AnalysisOutcome:
@@ -123,22 +158,86 @@ def question_fallback_answer() -> str:
     return STUDENT_ASK_FALLBACK
 
 
-def _format_question_context(context_messages: list[Any], max_chars: int = 6000) -> str:
-    lines: list[str] = []
-    for item in context_messages[-20:]:
+def _is_valid_api_base(api_base: Any) -> bool:
+    if not isinstance(api_base, str):
+        return False
+    try:
+        parsed = urlsplit(api_base)
+        _ = parsed.port  # validates numeric form and the 0..65535 range
+    except ValueError:
+        return False
+    return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
+
+def question_llm_capability(cfg: dict[str, Any]) -> QuestionCapability:
+    """Report whether a student question can attempt the configured LLM."""
+    llm_cfg = cfg.get("llm", {}) or {}
+    if not llm_cfg.get("enable_llm", True):
+        return QuestionCapability(
+            "disabled",
+            "请在 Copilot 服务配置中启用 LLM 后重试。",
+        )
+    if not llm_cfg.get("api_key", ""):
+        return QuestionCapability(
+            "missing_api_key",
+            "请通过安全启动脚本加载 LLM 凭据后重试。",
+        )
+    if not llm_cfg.get("model") or not _is_valid_api_base(llm_cfg.get("api_base")):
+        return QuestionCapability(
+            "misconfigured",
+            "请检查 LLM 的 model 与 api_base 配置后重试。",
+        )
+    return QuestionCapability("ready")
+
+
+def _format_question_context(context_messages: list[Any], max_chars: int = 12_000) -> str:
+    blocks: list[tuple[int, int, str]] = []
+    source_priority = {
+        "session": 0,
+        "session_analysis": 1,
+        "student_asks": 2,
+        "diagnostic_bundle": 3,
+        "runtime_guidance": 4,
+    }
+    role_priority = {
+        "user": 0,
+        "assistant": 0,
+        "transcript": 0,
+        "session": 0,
+        "analysis": 1,
+        "prior_copilot": 2,
+        "diagnostics": 3,
+        "runtime_guidance": 4,
+    }
+    for index, item in enumerate(context_messages):
         if isinstance(item, dict):
             role = str(item.get("role") or item.get("type") or "context")
+            source = str(item.get("source") or "")
             content = str(item.get("content") or item.get("text") or "")
+            priority = source_priority.get(source, role_priority.get(role, 2))
         else:
             role = "context"
             content = str(item)
+            priority = 2
         content = content.strip()
         if content:
-            lines.append(f"[{role}] {content}")
-    text = "\n\n".join(lines)
-    if len(text) > max_chars:
-        return text[-max_chars:]
-    return text
+            blocks.append((index, priority, f"[{role}] {content}"))
+
+    # Reserve the budget by semantic priority, then restore chronological/layer
+    # order. Within each layer, newest complete blocks win; no block is sliced.
+    selected: list[tuple[int, str]] = []
+    used = 0
+    for priority in range(5):
+        for index, _, block in reversed(
+            [item for item in blocks if item[1] == priority]
+        ):
+            separator = 2 if selected else 0
+            if len(block) + separator > max_chars - used:
+                continue
+            selected.append((index, block))
+            used += len(block) + separator
+    selected.sort(key=lambda item: item[0])
+    return "\n\n".join(block for _, block in selected)
 
 
 def build_question_prompt(question: str, context_messages: list[Any]) -> str:
@@ -167,19 +266,29 @@ async def answer_question(
     question: str,
     context_messages: list[Any],
 ) -> str:
-    """Answer a student-initiated question with recent session context."""
+    """Compatibility wrapper returning only the student-facing answer text."""
+    return (await answer_question_with_status(cfg, question, context_messages)).answer
+
+
+async def answer_question_with_status(
+    cfg: dict,
+    question: str,
+    context_messages: list[Any],
+) -> QuestionAnswerOutcome:
+    """Answer a question while preserving a stable capability/error state."""
     llm_cfg = cfg.get("llm", {}) or {}
-    api_key = llm_cfg.get("api_key", "")
+    capability = question_llm_capability(cfg)
+    if capability.status != "ready":
+        log.warning("LLM 本地预检未通过 status=%s，返回学员提问降级答案", capability.status)
+        return QuestionAnswerOutcome(
+            capability.status,
+            STUDENT_ASK_FALLBACK,
+            capability.retry_guidance,
+        )
 
-    if not llm_cfg.get("enable_llm", True) or not api_key:
-        log.warning("LLM 未启用或无 API key，返回学员提问降级答案")
-        return STUDENT_ASK_FALLBACK
-
-    model = llm_cfg.get("model")
-    api_base = llm_cfg.get("api_base")
-    if not model or not api_base:
-        log.warning("LLM 配置缺少 model/api_base，返回学员提问降级答案")
-        return STUDENT_ASK_FALLBACK
+    api_key = llm_cfg["api_key"]
+    model = llm_cfg["model"]
+    api_base = llm_cfg["api_base"]
 
     payload = {
         "model": model,
@@ -202,12 +311,25 @@ async def answer_question(
             resp.raise_for_status()
             data = resp.json()
             content = str(data["choices"][0]["message"]["content"]).strip()
-            return content or STUDENT_ASK_FALLBACK
+            if content:
+                return QuestionAnswerOutcome("ready", content)
+            log.error("学员提问 LLM 返回空内容")
+    except httpx.TimeoutException:
+        log.error("学员提问 LLM 调用超时")
+        return QuestionAnswerOutcome(
+            "timeout",
+            STUDENT_ASK_FALLBACK,
+            "LLM 响应超时，请稍后重试；问题已保存。",
+        )
     except httpx.HTTPStatusError as e:
-        log.error("学员提问 LLM HTTP 错误: %s %s", e.response.status_code, e.response.text[:200])
+        log.error("学员提问 LLM HTTP 错误: %s", e.response.status_code)
     except Exception as e:
-        log.error("学员提问 LLM 调用异常: %s", e)
-    return STUDENT_ASK_FALLBACK
+        log.error("学员提问 LLM 调用异常: %s", type(e).__name__)
+    return QuestionAnswerOutcome(
+        "upstream_error",
+        STUDENT_ASK_FALLBACK,
+        "LLM 服务暂时不可用，请检查网络或稍后重试；问题已保存。",
+    )
 
 
 async def summarize_reply(

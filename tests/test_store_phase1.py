@@ -61,6 +61,32 @@ def test_raw_transcript_stores_full_content(store):
     assert len(row["content"]) == len(content)
 
 
+def test_raw_transcript_tail_query_never_materializes_full_content(store):
+    content = "MID-LINE-" + "x" * 500_000 + "\nCOMPLETE-LATEST-LINE\n"
+    store.add_raw_transcript("sess-tail", "stu-tail", content)
+
+    row = store.get_raw_transcript_tail_for_student_session(
+        "stu-tail",
+        "sess-tail",
+        max_chars=1_024,
+    )
+
+    assert row is not None
+    assert set(row) <= {
+        "id",
+        "session_id",
+        "student_id",
+        "content_sha256",
+        "created_at",
+        "content",
+        "content_truncated",
+    }
+    assert len(row["content"]) <= 1_024
+    assert row["content_truncated"] == 1
+    assert row["content"].endswith("COMPLETE-LATEST-LINE\n")
+    assert "MID-LINE-" not in row["content"]
+
+
 def test_mentor_messages_delivery_read_unique_and_since(store):
     store.upsert_student("stu-msg", "消息学员")
 

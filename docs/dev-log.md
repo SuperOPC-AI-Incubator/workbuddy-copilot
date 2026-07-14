@@ -1906,3 +1906,127 @@ student-scoped cursor 与可选 limit，但严格要求 `delivered_at IS NULL`�
 | P0-1~P0-3、P0-5~P0-8 | 测试方案 v2 对应命令 | PASS：导入、FastAPI app、组合根正常；多 worker 按预期拒绝；server redlines 6 passed、public auth 4 passed、部署/URL 配置 18 passed。 |
 | 当前树隐私门 | `<项目虚拟环境>/bin/python -m pytest tests/test_repository_privacy.py tests/test_wb_upload.py -q` | PASS（15 passed）：两张敏感导师截图不在 Git 索引，受跟踪内容不含个人主目录路径。 |
 | 文本与差异检查 | `git grep` 个人路径扫描；`git diff --check` | PASS：无命中、无格式错误。 |
+
+### 项目说明页：白底紧凑重设计、双向架构与 Get 会议共识 — 2026-07-13
+
+根据内部汇报与协作开发场景，页面重构为白底项目简报：收敛字级和段落留白；增加“从信号到回应”的双向架构图；保留历史单机原型仅作演进背景，当前目标架构作为实施依据；将下载目录导出的 Get 会议笔记浓缩为可公开同步的团队共识卡片，不展示会议转写原文。
+
+| 验证项 | 判定 |
+|---|---|
+| 下载目录 Get 导出笔记核对 | PASS：`Workbuddy copilot-AI助教支持工具项目需求讨论与开发安排-2026年07月13日-来自【Get 笔记】.md` 与页面所用的双目标、赛马协作、分组测试、任务卡/问卷整合方向一致 |
+| 历史架构资料复核 | PASS：当前目标架构可用于概览；`docs/architecture.md` 的旧本地读取假设仅作为演进背景，不作为实施图 |
+| 静态资源请求 | PASS：本地 HTTP 下页面、导师端截图、学员端截图均返回 200 |
+| 桌面完整页面预览（Playwright，Desktop Chrome HiDPI） | PASS：白底紧凑布局、双向架构图、两端截图、Get 共识卡、默认收起的三项技术细节均正常渲染 |
+| 窄屏完整页面预览（Playwright，Chromium 390×844） | PASS：页面转为单列；架构图保留横向查看并明确提示左右滑动；技术摘要与展开入口可读 |
+| `git diff --check` | PASS |
+
+命令调整：`--device='iPhone 13'` 会拉起本机 WebKit，浏览器进程被环境以 SIGKILL 终止，未产生页面错误或截图文件；改用 Chromium 的 390×844 等效窄屏 viewport 后稳定完成预览，故以该命令作为本次移动端验证依据。
+
+### 项目说明页：开发资料网页化与章节详情补充 — 2026-07-13
+
+将原先直接打开 Markdown 的三项入口改为 `docs/developer-guide.html` 中的三个网页章节（目标架构 / 复用地图 / 测试判据）；概览页 01–05 新增默认收起的背景、原型能力、分层动机、双端职责和协作方式说明，06 保持三个技术主题的独立展开。公开发布包不再提供原始 Markdown 入口。
+
+| 验证项 | 判定 |
+|---|---|
+| 本地静态资源与锚点 | PASS：概览、开发手册、三项章节锚点、两张截图均返回 200；概览三入口均指向 `developer-guide.html` |
+| 默认折叠状态 | PASS：概览和开发手册的 `details` 没有 `open` 属性，初始只显示摘要 |
+| 桌面 / 窄屏视觉验证（Playwright，Chromium） | PASS：概览页桌面完整截图、开发手册桌面与 390×844 窄屏截图均完成；窄屏阅读顺序为架构→复用→测试 |
+| 发布包验证 | PASS：发布包只含概览页、开发手册和两张截图；不包含原始 Markdown 入口 |
+| 公网验收 | PASS：`https://workbuddy-copilot.superbrain-ai.com` 与 `/developer-guide.html`、两张截图均为 200；旧 `/resources/target-architecture.md` 为 404；三个锚点存在 |
+| `git diff --check` | PASS |
+
+发布排障记录：首次部署后主页返回 403。原因是 `mktemp -d` 生成的发布包顶层目录权限为 `700`，rsync 创建远端同名目录时继承该权限，Nginx 无法进入；将发布包顶层目录改为 `755` 后重新同步，公网主页与资源恢复 200。后续静态发布包创建后需显式校正顶层目录为可读取权限。
+
+### 导师发起同步时学员客户端离线无反馈 — 2026-07-13
+
+根因：离线同步请求已正确持久化为 `pending`，学员端上线后也能补拉；但导师端
+POST/GET 快照没有暴露 `WSRegistry` 中的瞬时学员连接态，前端因而把所有 `pending`
+统一渲染为“等待学员端接收”并无限轮询。
+
+| RED | 结果 |
+|---|---|
+| `venv/bin/python -m pytest tests/test_upload_requests.py::test_offline_upload_request_is_visible_to_student_and_can_complete tests/test_upload_requests.py::test_mentor_upload_snapshot_reflects_live_float_connection -q` | FAIL（2 failed）：POST/GET 均缺少 `student_online` |
+| `venv/bin/python -m pytest tests/e2e/test_mentor_ui.py::test_sync_feedback_shows_offline_then_refreshes_when_student_connects -q` | FAIL（1 failed）：`student_online=false` 仍显示“已请求同步，等待学员端接收…” |
+
+修复：
+
+- `WSRegistry.is_float_connected(student_id)` 封装学员浮标当前连接态。导师专用的
+  request-upload POST、请求状态 GET、诊断重试响应与导师 WS 状态快照加入
+  `student_online`；学员补拉 API 契约不变。该值每次从内存连接表即时计算，不入库，
+  避免将过期在线态当成持久事实。
+- 前端在 `pending + student_online=false` 时明确显示“学员端未启动；同步请求已保存，
+  客户端启动后将自动接收。”；继续轮询，在线态变为 true 后恢复“等待接收”。
+  真值或旧服务缺字段时保持旧文案兼容。
+
+| GREEN | 判定 |
+|---|---|
+| 新增后端离线/在线瞬时快照、离线补拉、FakeWebSocket 真实收到 `mentor_command` | PASS（2 passed） |
+| 新增 Playwright 离线文案→轮询刷新为在线文案；精确离线文案作为负控 | PASS（1 passed） |
+| `venv/bin/python -m pytest tests/test_upload_requests.py -q` | PASS（23 passed） |
+| `venv/bin/python -m pytest tests/e2e/test_mentor_ui.py -q` | PASS（26 passed） |
+| `venv/bin/python -m pytest tests/ -q` | PASS（497 passed，14 个既有/上游弃用 warning） |
+| P0-1~P0-8（P0-5 以 `COPILOT_WORKERS=2` 非零拒绝为预期） | PASS：server redline 6 passed、public auth 4 passed、deploy/config 11 passed |
+
+现场验收：重启 8765 后 `/health` 返回 `UP`，导师静态资源已包含新的离线提示文案；
+8766 的 Paper Edit Studio 监听进程保持不变。原请求
+`bff25ab926f9441aaa80201d286c9da0` 的真实导师 GET 已返回 `student_online=true`，
+证明客户端重连后的瞬时状态已进入接口。该请求随后暴露出独立的既有上传问题：92 个本地
+会话全部失败，客户端适配器统一返回 `transcript_index_incomplete: transcript byte limit exceeded`；
+现场共有 259 个 JSONL、约 66.2 MB，超过当前 8 MiB 聚合索引预算。此问题未通过放宽安全
+边界猜测性修复，留作后续单独设计与验证。
+
+### 学员 AI 助教当前问题闭环 — 2026-07-14
+
+本轮把产品最终目标写入 `docs/prd.md`，并同步更新目标架构、实施计划与增量测试方案：
+AI 助教在学员使用 WorkBuddy Agents 的过程中持续解决技术卡点并提供交互方法建议；导师
+能够看清学员与 AI 的协作过程并给出针对性干预。此次只实现当前明确需求，不扩展新的调研
+范围。
+
+实现结果：
+
+- 学员端改为“完整下拉框 + 最近 3 个快捷入口”，两处选择保持同步；会话按任务、空间分组，
+  每组按最后问答/活动时间倒序排列。
+- 明确区分本地无会话、尚未同步、已同步但暂无分析、服务不可用、LLM 不可用五类状态；
+  未同步时可选择“同步后提问”或“不带当前会话提问”。
+- 诊断信息默认附加；客户端采集操作系统、工具安装、WorkBuddy 路径/权限、代理配置存在性和
+  最近错误环，客户端与服务端双重脱敏。服务端只接收上传后的结构化诊断，不读取学员本地
+  文件系统。
+- 提问上下文严格按当前会话、同会话分析、有限历史提问、诊断、运行时提示词组装，并保持
+  学员/会话隔离；无会话模式不会误带其他对话。
+- 回答区可选择并提供复制按钮；LLM 和上下文返回结构化真实状态，不再把配置错误、缺密钥、
+  超时或上游错误统一显示为“LLM 未启动”。
+- 学员端打开/刷新时通过 `/api/student/capabilities` 获取本地配置预检结果，未提问前也能
+  如实区分 ready/disabled/missing_api_key/misconfigured；旧服务不报告时显示 unknown，
+  不虚报 ready。每次回答同时明确显示诊断信息实际“已附加”或“未附加”。
+- 下拉框与最近 3 个按钮在本地切换时立即同步真实控件选中态，不依赖服务刷新；服务离线时
+  仍保持一致。已同步但内容为空的会话返回 `no_context`，不存在的会话才返回 `not_synced`。
+- 大规模 transcript 索引改为元数据优先、只在选中会话时安全打开单文件；保留单文件 8 MiB
+  安全上限，不再把整个 projects 目录的聚合大小误判为单文件超限。真实本机 92/92 个会话
+  均可读取。
+- 导师同步的离线提示、在线连接态和 pending/running/stored/done/failed 状态反馈已闭环。
+- 完整审计 15 个 student-token 路由；`/recent`、`/sessions`、`/current_session`、
+  `/alerts/unread` 与 `/api/student/upload-requests` 均对缺失/空白学员身份 fail closed，
+  并用双学员 trap 证明不会因空值退化为无条件查询。
+
+防假绿与边界负控包括：敏感 Authorization/Cookie/JWT/长令牌、非法与越界 LLM 端口、
+超过 96 KiB 的问答请求、超量诊断节点、大 transcript SQL 尾部读取、上下文预算挤压、
+跨学员/跨会话串数据、陈旧异步 UI 结果、文件替换/符号链接、导师离线后上线等；均先证明
+原实现会失败再修复。
+
+| 最终验证 | 判定 |
+|---|---|
+| `venv/bin/python -m pytest tests/ -q` | PASS（598 passed，14 个既有/上游弃用 warning） |
+| P0-1~P0-3 | PASS（FastAPI 可构建；组合根返回 True） |
+| P0-5 | PASS（`COPILOT_WORKERS=2` 被 RuntimeError 拒绝） |
+| P0-6~P0-8 | PASS（server redline/public auth/deploy config 共 21 passed） |
+| 本轮核心学员/导师路径定向回归 | PASS（175 passed） |
+| 最终 15 个学员接口隔离复审 | PASS（132 passed；无 Critical / Important） |
+| `py_compile` + `git diff --check` | PASS |
+| 独立组件与最终集成审查 | Approved（学员 UI、诊断后端、大规模同步、导师离线反馈、身份隔离均无阻塞项） |
+
+真机验收：8765 服务 `/health` 返回 `UP`；学员浮标通过 WS 在线。真实问答返回
+`context_status=without_session`、`llm_status=ready`、`diagnostics_attached=true`，回答
+“LLM 已连接”。导师定向请求同步一个真实会话后，接口即时返回 `student_online=true`，
+随后 `transfer_status=stored`、`analysis_status=done`、无错误；LLM 分析请求返回 200。
+最终重启后 `/api/student/capabilities` 返回 `llm_status=ready`；缺身份的学员接口返回
+422、空白身份返回 400。Paper Edit Studio 的 8766 监听保持不变。

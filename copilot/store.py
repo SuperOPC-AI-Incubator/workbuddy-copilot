@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS student_asks (
     session_id TEXT,
     question TEXT,
     answer TEXT,
+    diagnostics_attached INTEGER NOT NULL DEFAULT 0,
+    diagnostics_summary TEXT NOT NULL DEFAULT '{}',
+    diagnostics_version TEXT NOT NULL DEFAULT '',
+    guidance_versions TEXT NOT NULL DEFAULT '[]',
+    context_status TEXT NOT NULL DEFAULT '',
+    llm_status TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     FOREIGN KEY (student_id) REFERENCES students(student_id) ON DELETE CASCADE
 );
@@ -205,6 +211,12 @@ _MIGRATIONS = [
     ("upload_requests", "analysis_status", "TEXT NOT NULL DEFAULT 'not_requested'"),
     ("upload_requests", "transfer_error", "TEXT DEFAULT ''"),
     ("upload_requests", "analysis_error", "TEXT DEFAULT ''"),
+    ("student_asks", "diagnostics_attached", "INTEGER NOT NULL DEFAULT 0"),
+    ("student_asks", "diagnostics_summary", "TEXT NOT NULL DEFAULT '{}'"),
+    ("student_asks", "diagnostics_version", "TEXT NOT NULL DEFAULT ''"),
+    ("student_asks", "guidance_versions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("student_asks", "context_status", "TEXT NOT NULL DEFAULT ''"),
+    ("student_asks", "llm_status", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 _POST_MIGRATION_SQL = [
@@ -603,6 +615,15 @@ class Store:
                 (student_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def session_exists_for_student(self, student_id: str, session_id: str) -> bool:
+        """Return whether the authoritative sessions row belongs to this student."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT 1 FROM sessions WHERE student_id = ? AND session_id = ? LIMIT 1",
+                (student_id, session_id),
+            ).fetchone()
+            return row is not None
 
     def get_session_title(self, session_id: str) -> str:
         """Return a session title from copilot.db."""
@@ -1406,6 +1427,35 @@ class Store:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_raw_transcript_tail_for_student_session(
+        self,
+        student_id: str,
+        session_id: str,
+        *,
+        max_chars: int,
+    ) -> dict | None:
+        """Return a bounded SQL-side tail without materializing full content."""
+        limit = min(max(int(max_chars), 1), 1_000_000)
+        with self._conn() as c:
+            row = c.execute(
+                """SELECT id, session_id, student_id, content_sha256, created_at,
+                          CASE
+                            WHEN length(COALESCE(content, '')) > ?
+                            THEN substr(COALESCE(content, ''), ?)
+                            ELSE COALESCE(content, '')
+                          END AS content,
+                          CASE
+                            WHEN length(COALESCE(content, '')) > ? THEN 1
+                            ELSE 0
+                          END AS content_truncated
+                   FROM raw_transcripts
+                   WHERE student_id = ? AND session_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT 1""",
+                (limit, -limit, limit, student_id, session_id),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_raw_transcript_for_student_session_sha(
         self,
         student_id: str,
@@ -1450,15 +1500,37 @@ class Store:
         session_id: str | None,
         question: str,
         answer: str,
+        *,
+        diagnostics_attached: bool = False,
+        diagnostics_summary: dict[str, Any] | None = None,
+        diagnostics_version: str = "",
+        guidance_versions: list[str] | None = None,
+        context_status: str = "",
+        llm_status: str = "",
     ) -> int:
         """Persist a student-initiated Copilot question and answer."""
         self.upsert_student(student_id)
         with self._conn() as c:
             cur = c.execute(
                 """INSERT INTO student_asks
-                   (student_id, session_id, question, answer, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (student_id, session_id, question, answer, time.time()),
+                   (student_id, session_id, question, answer,
+                    diagnostics_attached, diagnostics_summary,
+                    diagnostics_version, guidance_versions,
+                    context_status, llm_status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    student_id,
+                    session_id,
+                    question,
+                    answer,
+                    1 if diagnostics_attached else 0,
+                    json.dumps(diagnostics_summary or {}, ensure_ascii=False),
+                    diagnostics_version,
+                    json.dumps(guidance_versions or [], ensure_ascii=False),
+                    context_status,
+                    llm_status,
+                    time.time(),
+                ),
             )
             return cur.lastrowid
 
@@ -1497,7 +1569,13 @@ class Store:
             ).fetchone()
             return dict(row) if row else None
 
-    def list_student_asks(self, student_id: str, session_id: str | None = None) -> list[dict]:
+    def list_student_asks(
+        self,
+        student_id: str,
+        session_id: str | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[dict]:
         """List a student's Copilot questions, newest first."""
         with self._conn() as c:
             params: list[Any] = [student_id]
@@ -1505,10 +1583,14 @@ class Store:
             if session_id is not None:
                 where += " AND session_id = ?"
                 params.append(session_id)
+            limit_clause = ""
+            if limit is not None:
+                limit_clause = " LIMIT ?"
+                params.append(max(0, int(limit)))
             rows = c.execute(
                 f"""SELECT * FROM student_asks
                     WHERE {where}
-                    ORDER BY created_at DESC, id DESC""",
+                    ORDER BY created_at DESC, id DESC{limit_clause}""",
                 params,
             ).fetchall()
             return [dict(r) for r in rows]

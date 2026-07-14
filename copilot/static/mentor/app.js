@@ -68,6 +68,7 @@ function newUploadRequestState() {
     transferError: '',
     analysisError: '',
     result: null,
+    studentOnline: null,
     updatedAt: 0,
   };
 }
@@ -764,6 +765,9 @@ function normalizeUploadRequest(snapshot, previous) {
     transferError: snapshot.transfer_error || '',
     analysisError: snapshot.analysis_error || '',
     result: snapshot.result !== undefined ? snapshot.result : prior.result,
+    studentOnline: snapshot.student_online !== undefined
+      ? snapshot.student_online === true
+      : prior.studentOnline,
     updatedAt: snapshot.updated_at != null ? Number(snapshot.updated_at) || 0 : prior.updatedAt,
   };
 }
@@ -801,7 +805,9 @@ function renderUploadRequest() {
   let isError = false;
   let canRetryAnalysis = false;
   if (request.transferStatus === 'pending') {
-    text = '已请求同步，等待学员端接收…';
+    text = request.studentOnline === false
+      ? '学员端未启动；同步请求已保存，客户端启动后将自动接收。'
+      : '已请求同步，等待学员端接收…';
   } else if (request.transferStatus === 'running') {
     text = '正在上传对话…';
   } else if (request.transferStatus === 'failed') {

@@ -3,10 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
+import warnings
 from urllib.parse import parse_qs, urlparse
 
 import copilot.floating_native as floating_native
-from copilot.floating_native import CopilotNativeApp, _build_float_ws_url, _panel_origin_for_icon
+from copilot.floating_native import (
+    CopilotNativeApp,
+    _build_float_ws_url,
+    _panel_origin_for_icon,
+)
 from copilot.student_platform.macos import StudentCoordinatorCommandCallback
 
 
@@ -229,7 +235,7 @@ def test_poll_current_session_prefers_local_workbuddy_detection(monkeypatch):
     server_calls = []
 
     def fake_read_sessions(limit):
-        assert limit == 8
+        assert limit == 1000
         return [
             {
                 "session_id": "sess-current",
@@ -281,6 +287,1224 @@ def test_poll_current_session_prefers_local_workbuddy_detection(monkeypatch):
     assert app._wb_sessions[0]["is_active"] is True
 
 
+def test_poll_keeps_manual_selection_while_panel_is_open_when_local_active_changes():
+    rebuilt = []
+
+    class FakeApp:
+        pollCurrentSession_ = CopilotNativeApp.pollCurrentSession_
+        _current_session_id = "manual-session"
+        _panel_visible = True
+        _wb_sessions = []
+        _sessions = {}
+        _sessions_list = []
+
+        def _read_local_current_session(self):
+            return {
+                "session_id": "new-active",
+                "items": [
+                    {
+                        "session_id": "new-active",
+                        "session_title": "新活跃任务",
+                        "group_type": "task",
+                        "last_activity_at": 20,
+                        "is_active": True,
+                    },
+                    {
+                        "session_id": "manual-session",
+                        "session_title": "学员正在查看",
+                        "group_type": "task",
+                        "last_activity_at": 10,
+                        "is_active": False,
+                    },
+                ],
+            }
+
+        def _get_json(self, path, *, timeout):
+            raise AssertionError("有本地会话时不应请求 current_session")
+
+        def _rebuild_session_bar(self):
+            rebuilt.append(self._current_session_id)
+
+        def _update_icon_state(self):
+            pass
+
+    app = FakeApp()
+    app.pollCurrentSession_(None)
+
+    assert app._current_session_id == "manual-session"
+    assert [item["session_id"] for item in app._wb_sessions] == [
+        "new-active",
+        "manual-session",
+    ]
+    assert rebuilt == ["manual-session"]
+
+
+def test_poll_with_unchanged_local_inventory_does_not_rebuild_large_selector():
+    sessions = [{
+        "session_id": "session-1",
+        "session_title": "同一任务",
+        "group_type": "task",
+        "space_name": "",
+        "last_activity_at": 20,
+        "is_active": True,
+    }]
+
+    class FakeApp:
+        pollCurrentSession_ = CopilotNativeApp.pollCurrentSession_
+        _current_session_id = "session-1"
+        _panel_visible = True
+        _wb_sessions = list(sessions)
+        _sessions_list = list(sessions)
+        _rendered_session_signature = floating_native._session_selector_render_signature(
+            sessions,
+            {"session-1": {"title": "同一任务", "unread": 0}},
+            "session-1",
+        )
+        _sessions = {"session-1": {"title": "同一任务", "unread": 0}}
+
+        def _read_local_current_session(self):
+            return {"session_id": "session-1", "items": list(sessions)}
+
+        def _get_json(self, path, *, timeout):
+            raise AssertionError("不应请求服务端")
+
+        def _rebuild_session_bar(self):
+            raise AssertionError("会话签名未变，不应重建 1000 项下拉框")
+
+        def _update_icon_state(self):
+            raise AssertionError("无状态变化时不应重算图标")
+
+    FakeApp().pollCurrentSession_(None)
+
+
+def test_poll_timestamp_changes_without_order_change_does_not_rebuild_selector():
+    rendered_sessions = [
+        {
+            "session_id": "session-newer",
+            "session_title": "新任务",
+            "group_type": "task",
+            "space_name": "",
+            "last_activity_at": 20,
+            "is_active": True,
+        },
+        {
+            "session_id": "session-older",
+            "session_title": "旧任务",
+            "group_type": "task",
+            "space_name": "",
+            "last_activity_at": 10,
+            "is_active": False,
+        },
+    ]
+    polled_sessions = [
+        {**rendered_sessions[0], "last_activity_at": 22},
+        {**rendered_sessions[1], "last_activity_at": 11},
+    ]
+
+    class FakeApp:
+        pollCurrentSession_ = CopilotNativeApp.pollCurrentSession_
+        _current_session_id = "session-newer"
+        _panel_visible = True
+        _wb_sessions = list(rendered_sessions)
+        _sessions_list = list(rendered_sessions)
+        _rendered_session_signature = (
+            ("session-newer", "新任务", "任务", "", True, 0, True),
+            ("session-older", "旧任务", "任务", "", False, 0, False),
+        )
+        _sessions = {
+            "session-newer": {"title": "新任务", "unread": 0},
+            "session-older": {"title": "旧任务", "unread": 0},
+        }
+
+        def _read_local_current_session(self):
+            return {"session_id": "session-newer", "items": list(polled_sessions)}
+
+        def _rebuild_session_bar(self):
+            raise AssertionError("时间戳变化未改变排序时不应重建选择器")
+
+        def _update_icon_state(self):
+            raise AssertionError("菜单呈现未变时不应重算图标")
+
+    FakeApp().pollCurrentSession_(None)
+
+
+def test_poll_timestamp_change_that_reorders_sessions_rebuilds_selector():
+    rendered_sessions = [
+        {
+            "session_id": "session-first",
+            "session_title": "任务一",
+            "group_type": "task",
+            "space_name": "",
+            "last_activity_at": 20,
+            "is_active": True,
+        },
+        {
+            "session_id": "session-second",
+            "session_title": "任务二",
+            "group_type": "task",
+            "space_name": "",
+            "last_activity_at": 10,
+            "is_active": False,
+        },
+    ]
+    polled_sessions = [
+        dict(rendered_sessions[0]),
+        {**rendered_sessions[1], "last_activity_at": 30},
+    ]
+    rebuilt = []
+
+    class FakeApp:
+        pollCurrentSession_ = CopilotNativeApp.pollCurrentSession_
+        _current_session_id = "session-first"
+        _panel_visible = True
+        _wb_sessions = list(rendered_sessions)
+        _sessions_list = list(rendered_sessions)
+        _rendered_session_signature = (
+            ("session-first", "任务一", "任务", "", True, 0, True),
+            ("session-second", "任务二", "任务", "", False, 0, False),
+        )
+        _sessions = {
+            "session-first": {"title": "任务一", "unread": 0},
+            "session-second": {"title": "任务二", "unread": 0},
+        }
+
+        def _read_local_current_session(self):
+            # Keep the active marker stable so this test isolates ordering only.
+            return {"session_id": "session-first", "items": list(polled_sessions)}
+
+        def _rebuild_session_bar(self):
+            rebuilt.append([item["session_id"] for item in self._sessions_list])
+
+        def _update_icon_state(self):
+            pass
+
+    FakeApp().pollCurrentSession_(None)
+
+    assert rebuilt == [["session-second", "session-first"]]
+
+
+def test_server_current_session_fallback_never_becomes_local_selector_inventory(
+    monkeypatch,
+):
+    requests = []
+    server_history = [{
+        "session_id": "server-history",
+        "session_title": "服务端历史",
+        "group_type": "task",
+        "last_activity_at": 99,
+        "is_active": True,
+    }]
+
+    class FakeApp:
+        pollCurrentSession_ = CopilotNativeApp.pollCurrentSession_
+        _current_session_id = "manual-session"
+        _panel_visible = True
+        _wb_sessions = []
+        _sessions = {}
+        _sessions_list = []
+        _student_id = "student-a"
+        _poll_fallback_inflight = False
+        _poll_fallback_generation = 0
+
+        def _read_local_current_session(self):
+            return None
+
+        def _get_json(self, path, *, query, timeout):
+            assert path == "/current_session"
+            requests.append(dict(query))
+            return {"session_id": "server-history", "items": server_history}
+
+        def _rebuild_session_bar(self):
+            pass
+
+        def _update_icon_state(self):
+            pass
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, daemon):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(floating_native.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: func(*args),
+    )
+
+    app = FakeApp()
+    app.pollCurrentSession_(None)
+
+    assert requests == [{"student_id": "student-a"}]
+    assert app._current_session_id == "manual-session"
+    assert app._wb_sessions == []
+    assert app._sessions_list == []
+    assert floating_native._analysis_empty_state(
+        app._wb_sessions,
+        app._current_session_id,
+        {"server-history"},
+        True,
+        "ready",
+    ) == "no_local_sessions"
+
+
+def test_server_current_session_fallback_is_singleflight_and_never_blocks_timer(monkeypatch):
+    main_thread_id = threading.get_ident()
+    network_thread_ids = []
+    callbacks = []
+    callback_ready = threading.Event()
+    refreshed = []
+
+    class FakeApp:
+        pollCurrentSession_ = CopilotNativeApp.pollCurrentSession_
+        _current_session_id = None
+        _panel_visible = False
+        _wb_sessions = []
+        _sessions_list = []
+        _sessions = {}
+        _poll_fallback_inflight = False
+        _poll_fallback_generation = 0
+        _student_id = "student-a"
+
+        def _read_local_current_session(self):
+            return None
+
+        def _get_json(self, path, *, query, timeout):
+            assert path == "/current_session"
+            assert query == {"student_id": "student-a"}
+            network_thread_ids.append(threading.get_ident())
+            time.sleep(0.12)
+            return {
+                "session_id": "server-active",
+                "items": [{"session_id": "server-active"}],
+            }
+
+        def _refresh_data(self):
+            refreshed.append(self._current_session_id)
+
+        def _rebuild_session_bar(self):
+            pass
+
+        def _update_icon_state(self):
+            pass
+
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: (callbacks.append((func, args)), callback_ready.set()),
+    )
+
+    app = FakeApp()
+    started = time.monotonic()
+    app.pollCurrentSession_(None)
+    app.pollCurrentSession_(None)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.05
+    assert callback_ready.wait(1.0)
+    assert network_thread_ids == [network_thread_ids[0]]
+    assert network_thread_ids[0] != main_thread_id
+
+    func, args = callbacks.pop(0)
+    func(*args)
+    assert app._current_session_id == "server-active"
+    assert refreshed == ["server-active"]
+    assert app._poll_fallback_inflight is False
+
+
+def test_server_current_session_request_is_scoped_and_fails_closed_without_identity():
+    requests = []
+
+    class FakeApp:
+        _student_id = "student-a"
+
+        def _get_json(self, path, *, query, timeout):
+            requests.append((path, dict(query), timeout))
+            return {"session_id": "session-a", "items": []}
+
+    assert CopilotNativeApp._get_scoped_server_current_session(FakeApp()) == {
+        "session_id": "session-a",
+        "items": [],
+    }
+    assert requests == [
+        ("/current_session", {"student_id": "student-a"}, 3)
+    ]
+
+    requests.clear()
+    empty = FakeApp()
+    empty._student_id = "  "
+    assert CopilotNativeApp._get_scoped_server_current_session(empty) is None
+    assert requests == []
+
+
+def test_refresh_does_not_fill_local_selector_from_server_history(monkeypatch):
+    rebuilt = []
+    callbacks = []
+    ready = threading.Event()
+
+    class FakeApp:
+        _student_id = "student-a"
+        _current_session_id = "server-history"
+        _wb_sessions = []
+        _sessions = {}
+        _items = []
+        _mentor_items = []
+        _llm_status = "ready"
+
+        def _get_json(self, path, *, query, timeout):
+            if path == "/sessions":
+                return {"items": [{
+                    "session_id": "server-history",
+                    "session_title": "仅服务端存在",
+                    "group_type": "task",
+                    "last_activity_at": 99,
+                }]}
+            if path == "/recent":
+                return {"items": []}
+            raise AssertionError(path)
+
+        def _rebuild_session_bar(self):
+            rebuilt.append(list(self._sessions_list))
+
+        def _rebuild_cards(self):
+            pass
+
+        def _update_icon_state(self):
+            pass
+
+    app = FakeApp()
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: (callbacks.append((func, args)), ready.set()),
+    )
+    CopilotNativeApp._refresh_data(app)
+    assert ready.wait(1.0)
+    func, args = callbacks.pop(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", floating_native.objc.ObjCPointerWarning)
+        func(*args)
+
+    assert app._synced_session_ids == {"server-history"}
+    assert app._sessions_list == []
+    assert rebuilt == []
+
+
+def test_refresh_consumes_real_student_capability_status_and_guidance(monkeypatch):
+    callbacks = []
+    requests = []
+
+    class FakeApp:
+        def _get_json(self, path, *, query, timeout):
+            requests.append((path, dict(query)))
+            if path == "/sessions":
+                return {"items": [{"session_id": "session-1"}]}
+            if path == "/recent":
+                return {"items": [], "context_status": "ready"}
+            if path == "/api/student/capabilities":
+                return {
+                    "llm_status": "missing_api_key",
+                    "retry_guidance": "请配置模型密钥后重试。",
+                }
+            raise AssertionError(path)
+
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: callbacks.append((func, args)),
+    )
+
+    app = FakeApp()
+    CopilotNativeApp._refresh_data_worker(
+        app,
+        3,
+        "student-a",
+        "session-1",
+        [{"session_id": "session-1"}],
+        "unknown",
+    )
+
+    assert [path for path, _query in requests] == [
+        "/api/student/capabilities",
+        "/sessions",
+        "/recent",
+    ]
+    assert all(query["student_id"] == "student-a" for _path, query in requests)
+    _func, args = callbacks[0]
+    result = args[1]
+    assert result["llm_status"] == "missing_api_key"
+    assert result["llm_retry_guidance"] == "请配置模型密钥后重试。"
+
+
+def test_legacy_refresh_without_capability_fields_is_unknown_not_ready(monkeypatch):
+    callbacks = []
+
+    class FakeApp:
+        def _get_json(self, path, *, query, timeout):
+            if path == "/sessions":
+                return {"items": []}
+            if path == "/recent":
+                return {"items": []}
+            if path == "/api/student/capabilities":
+                return {}
+            raise AssertionError(path)
+
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: callbacks.append((func, args)),
+    )
+
+    CopilotNativeApp._refresh_data_worker(
+        FakeApp(), 1, "student-a", "", [], "unknown"
+    )
+
+    _func, args = callbacks[0]
+    assert args[1]["llm_status"] == "unknown"
+    assert "未报告" in args[1]["llm_retry_guidance"]
+
+
+def test_refresh_with_empty_student_id_fails_closed_without_any_network_request(monkeypatch):
+    network_calls = []
+    callbacks = []
+
+    class FakeApp:
+        def _get_json(self, *args, **kwargs):
+            network_calls.append((args, kwargs))
+            raise AssertionError("缺少 student_id 时不得发起请求")
+
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: callbacks.append((func, args)),
+    )
+
+    CopilotNativeApp._refresh_data_worker(FakeApp(), 1, "", "", [], "ready")
+
+    assert network_calls == []
+    assert len(callbacks) == 1
+    func, args = callbacks[0]
+    assert func.__func__ is CopilotNativeApp._apply_refresh_failure
+    assert args[1] == "MissingStudentId"
+
+
+def test_refresh_failure_clears_stale_analysis_and_renders_service_unavailable(monkeypatch):
+    container = floating_native.NSView.alloc().initWithFrame_(
+        floating_native.NSMakeRect(0, 0, 356, 240)
+    )
+
+    class FakeApp:
+        _student_id = "student-a"
+        _current_session_id = "session-1"
+        _wb_sessions = [{"session_id": "session-1"}]
+        _synced_session_ids = {"session-1"}
+        _sessions = {"session-1": {"unread": 0}}
+        _items = [{
+            "event": "Stop",
+            "created_at": 1,
+            "raw": json.dumps({"topic": "过期分析", "understanding": "low"}),
+        }]
+        _mentor_items = []
+        _llm_status = "ready"
+        card_container = container
+        _rebuild_cards = CopilotNativeApp._rebuild_cards
+        _add_panel_card = CopilotNativeApp._add_panel_card
+
+        def _get_json(self, path, *, query, timeout):
+            raise ConnectionError("服务已断开")
+
+    app = FakeApp()
+    callbacks = []
+    ready = threading.Event()
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: (callbacks.append((func, args)), ready.set()),
+    )
+    CopilotNativeApp._refresh_data(app)
+    assert ready.wait(1.0)
+    func, args = callbacks.pop(0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", floating_native.objc.ObjCPointerWarning)
+        func(*args)
+
+    rendered_text = []
+    pending = list(container.subviews())
+    while pending:
+        view = pending.pop()
+        pending.extend(list(view.subviews()))
+        try:
+            rendered_text.append(str(view.stringValue()))
+        except Exception:
+            pass
+
+    assert app._items == []
+    assert app._service_available is False
+    assert any("Copilot 服务暂时不可用" in text for text in rendered_text)
+
+
+def test_refresh_returns_immediately_fetches_in_worker_and_applies_on_main_thread(monkeypatch):
+    main_thread_id = threading.get_ident()
+    network_thread_ids = []
+    apply_thread_ids = []
+    callbacks = []
+    callback_ready = threading.Event()
+
+    class FakeApp:
+        _refresh_data = CopilotNativeApp._refresh_data
+        _student_id = "student-a"
+        _current_session_id = "session-1"
+        _wb_sessions = [{
+            "session_id": "session-1",
+            "session_title": "本地任务",
+            "group_type": "task",
+            "last_activity_at": 20,
+        }]
+        _sessions_list = []
+        _sessions = {}
+        _items = [{"raw": "old"}]
+        _mentor_items = []
+        _llm_status = "ready"
+        _refresh_inflight = False
+        _refresh_request_generation = 0
+        _refresh_pending = False
+
+        def _get_json(self, path, *, query, timeout):
+            network_thread_ids.append(threading.get_ident())
+            time.sleep(0.08)
+            if path == "/sessions":
+                return {"items": [{"session_id": "session-1"}]}
+            return {"items": [{"raw": "new"}], "context_status": "ready"}
+
+        def _rebuild_session_bar(self):
+            apply_thread_ids.append(threading.get_ident())
+
+        def _rebuild_cards(self):
+            apply_thread_ids.append(threading.get_ident())
+
+        def _update_icon_state(self):
+            apply_thread_ids.append(threading.get_ident())
+
+    def capture_call_after(func, *args):
+        callbacks.append((func, args))
+        callback_ready.set()
+
+    monkeypatch.setattr(floating_native.AppHelper, "callAfter", capture_call_after)
+
+    app = FakeApp()
+    started = time.monotonic()
+    app._refresh_data()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.05
+    assert callback_ready.wait(1.0)
+    assert network_thread_ids and all(tid != main_thread_id for tid in network_thread_ids)
+    assert app._items == [{"raw": "old"}]
+
+    func, args = callbacks.pop(0)
+    assert func.__self__ is app
+    assert func.__func__ is CopilotNativeApp._apply_refresh_result
+    func(*args)
+
+    assert app._items == [{"raw": "new"}]
+    assert app._refresh_inflight is False
+    assert apply_thread_ids and all(tid == main_thread_id for tid in apply_thread_ids)
+
+
+def test_refresh_apply_preserves_newer_local_inventory_from_poll(monkeypatch):
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    callback_ready = threading.Event()
+    callbacks = []
+    rebuilt = []
+    original = {
+        "session_id": "session-1",
+        "session_title": "原任务",
+        "group_type": "task",
+        "last_activity_at": 10,
+    }
+    newly_seen = {
+        "session_id": "session-new",
+        "session_title": "轮询新发现",
+        "group_type": "task",
+        "last_activity_at": 20,
+    }
+
+    class FakeApp:
+        _student_id = "student-a"
+        _current_session_id = "session-1"
+        _wb_sessions = [original]
+        _sessions_list = [original]
+        _sessions = {"session-1": {"title": "原任务", "unread": 0}}
+        _items = []
+        _mentor_items = []
+        _llm_status = "ready"
+        _refresh_inflight = False
+        _refresh_pending = False
+        _refresh_request_generation = 0
+        _rendered_session_signature = floating_native._session_selector_render_signature(
+            [original],
+            {"session-1": {"title": "原任务", "unread": 0}},
+            "session-1",
+        )
+
+        def _get_json(self, path, *, query, timeout):
+            if path == "/sessions":
+                fetch_started.set()
+                assert release_fetch.wait(1.0)
+                return {"items": [{"session_id": "session-1"}]}
+            return {"items": []}
+
+        def _rebuild_session_bar(self):
+            rebuilt.append([item["session_id"] for item in self._sessions_list])
+
+        def _rebuild_cards(self):
+            pass
+
+        def _update_icon_state(self):
+            pass
+
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: (callbacks.append((func, args)), callback_ready.set()),
+    )
+
+    app = FakeApp()
+    CopilotNativeApp._refresh_data(app)
+    assert fetch_started.wait(1.0)
+
+    # 模拟 worker 期间 pollCurrentSession_ 发现了新的真实本地会话。
+    app._wb_sessions = [newly_seen, original]
+    app._sessions_list = floating_native._sort_sessions_for_selector(app._wb_sessions)
+    release_fetch.set()
+
+    assert callback_ready.wait(1.0)
+    func, args = callbacks.pop(0)
+    func(*args)
+
+    assert [item["session_id"] for item in app._sessions_list] == [
+        "session-new",
+        "session-1",
+    ]
+    assert rebuilt == [["session-new", "session-1"]]
+
+
+def test_refresh_for_old_session_is_discarded_after_hidden_ws_switch(monkeypatch):
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    callback_ready = threading.Event()
+    callbacks = []
+
+    class FakeApp:
+        _student_id = "student-a"
+        _current_session_id = "session-a"
+        _panel_visible = False
+        _wb_sessions = [{"session_id": "session-a", "group_type": "task"}]
+        _sessions_list = list(_wb_sessions)
+        _sessions = {}
+        _items = [{"raw": "session-b-existing"}]
+        _mentor_items = []
+        _context_status = "ready"
+        _llm_status = "ready"
+        _refresh_inflight = False
+        _refresh_pending = False
+        _refresh_request_generation = 0
+
+        def _get_json(self, path, *, query, timeout):
+            if path == "/sessions":
+                fetch_started.set()
+                assert release_fetch.wait(1.0)
+                return {"items": [{"session_id": "session-a"}]}
+            return {
+                "items": [{"raw": "stale-session-a"}],
+                "context_status": "not_synced",
+                "llm_status": "missing_api_key",
+            }
+
+        def _update_icon_state(self):
+            pass
+
+        def _show_notification(self, result, session_title):
+            pass
+
+        def _rebuild_session_bar(self):
+            raise AssertionError("过期快照不应重建选择器")
+
+        def _rebuild_cards(self):
+            raise AssertionError("过期快照不应重建卡片")
+
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: (callbacks.append((func, args)), callback_ready.set()),
+    )
+
+    app = FakeApp()
+    CopilotNativeApp._refresh_data(app)
+    assert fetch_started.wait(1.0)
+
+    CopilotNativeApp._handle_ws_message(app, json.dumps({
+        "type": "analysis",
+        "session_id": "session-b",
+        "session_title": "B",
+        "result": {"severity": "info"},
+    }))
+    assert app._current_session_id == "session-b"
+
+    release_fetch.set()
+    assert callback_ready.wait(1.0)
+    func, args = callbacks.pop(0)
+    func(*args)
+
+    assert app._items == [{"raw": "session-b-existing"}]
+    assert app._context_status == "ready"
+    assert app._llm_status == "ready"
+    assert app._refresh_inflight is False
+
+
+def test_service_unavailable_keeps_rendered_mentor_message_visible():
+    container = floating_native.NSView.alloc().initWithFrame_(
+        floating_native.NSMakeRect(0, 0, 356, 240)
+    )
+
+    class FakeApp:
+        _service_available = False
+        _context_status = "service_unavailable"
+        _llm_status = "ready"
+        _current_session_id = "session-1"
+        _wb_sessions = [{"session_id": "session-1"}]
+        _synced_session_ids = {"session-1"}
+        _items = []
+        _mentor_items = [{
+            "type": "mentor_message",
+            "message_id": "mentor-1",
+            "mentor_id": "mentor",
+            "text": "已 ACK 的导师建议不能丢",
+            "timestamp": 10,
+        }]
+        card_container = container
+        _add_panel_card = CopilotNativeApp._add_panel_card
+
+    app = FakeApp()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", floating_native.objc.ObjCPointerWarning)
+        CopilotNativeApp._rebuild_cards(app)
+
+    rendered_text = []
+    pending = list(container.subviews())
+    while pending:
+        view = pending.pop()
+        pending.extend(list(view.subviews()))
+        try:
+            rendered_text.append(str(view.stringValue()))
+        except Exception:
+            pass
+
+    assert any("服务暂时不可用" in text for text in rendered_text)
+    assert any("已 ACK 的导师建议不能丢" in text for text in rendered_text)
+
+
+def test_mentor_message_coexists_with_every_analysis_empty_state_and_not_synced_actions():
+    cases = (
+        (
+            "no_local_sessions",
+            {"_wb_sessions": [], "_synced_session_ids": set(), "_service_available": True, "_llm_status": "ready"},
+            "还没有发现 WorkBuddy 对话",
+        ),
+        (
+            "not_synced",
+            {"_wb_sessions": [{"session_id": "session-1"}], "_synced_session_ids": set(), "_service_available": True, "_llm_status": "ready"},
+            "当前对话尚未同步",
+        ),
+        (
+            "synced_no_analysis",
+            {"_wb_sessions": [{"session_id": "session-1"}], "_synced_session_ids": {"session-1"}, "_service_available": True, "_llm_status": "ready"},
+            "当前对话已同步",
+        ),
+        (
+            "service_unavailable",
+            {"_wb_sessions": [{"session_id": "session-1"}], "_synced_session_ids": {"session-1"}, "_service_available": False, "_llm_status": "ready"},
+            "Copilot 服务暂时不可用",
+        ),
+        (
+            "llm_unavailable",
+            {"_wb_sessions": [{"session_id": "session-1"}], "_synced_session_ids": {"session-1"}, "_service_available": True, "_llm_status": "missing_api_key"},
+            "LLM 暂不可用",
+        ),
+    )
+
+    for state, state_values, expected_status in cases:
+        container = floating_native.NSView.alloc().initWithFrame_(
+            floating_native.NSMakeRect(0, 0, 356, 280)
+        )
+
+        class FakeApp:
+            _context_status = state
+            _current_session_id = "session-1"
+            _items = []
+            _mentor_items = [{
+                "type": "mentor_message",
+                "message_id": "mentor-1",
+                "mentor_id": "mentor",
+                "text": "导师卡始终可见",
+                "timestamp": 10,
+            }]
+            _ask_inflight_generation = None
+            card_container = container
+            _add_panel_card = CopilotNativeApp._add_panel_card
+
+        app = FakeApp()
+        for name, value in state_values.items():
+            setattr(app, name, value)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", floating_native.objc.ObjCPointerWarning)
+            CopilotNativeApp._rebuild_cards(app)
+
+        rendered_text = []
+        pending = list(container.subviews())
+        while pending:
+            view = pending.pop()
+            pending.extend(list(view.subviews()))
+            try:
+                rendered_text.append(str(view.stringValue()))
+            except Exception:
+                pass
+
+        assert any(expected_status in text for text in rendered_text), state
+        assert any("导师卡始终可见" in text for text in rendered_text), state
+        if state == "not_synced":
+            assert app.sync_then_ask_button is not None
+            assert app.ask_without_context_button is not None
+            assert app.sync_then_ask_button.title() == "同步最近内容并提问"
+            assert app.ask_without_context_button.title() == "不带对话上下文提问"
+
+
+def test_session_selector_orders_tasks_then_spaces_then_unknown_by_recent_activity():
+    sessions = [
+        {"session_id": "unknown-new", "group_type": "", "last_activity_at": 99},
+        {"session_id": "space-new", "group_type": "space", "last_activity_at": 50},
+        {"session_id": "task-old", "group_type": "task", "last_activity_at": 10},
+        {"session_id": "task-new", "group_type": "task", "last_activity_at": 60},
+        {"session_id": "space-old", "group_type": "space", "last_activity_at": 20},
+    ]
+
+    ordered = floating_native._sort_sessions_for_selector(sessions)
+
+    assert [item["session_id"] for item in ordered] == [
+        "task-new",
+        "task-old",
+        "space-new",
+        "space-old",
+        "unknown-new",
+    ]
+    assert [item["session_id"] for item in ordered[:3]] == [
+        "task-new",
+        "task-old",
+        "space-new",
+    ]
+
+
+def test_dropdown_and_recent_shortcut_use_the_same_session_selection_path():
+    selected = []
+
+    class FakePopup:
+        def indexOfSelectedItem(self):
+            return 1
+
+    class FakeButton:
+        def tag(self):
+            return 0
+
+    class FakeApp:
+        sessionDropdownChanged_ = CopilotNativeApp.sessionDropdownChanged_
+        sessionButtonClicked_ = CopilotNativeApp.sessionButtonClicked_
+        _session_popup_ids = ["task-new", "task-old", "space-new"]
+        _recent_session_ids = ["task-new", "task-old", "space-new"]
+
+        def _select_session(self, session_id):
+            selected.append(session_id)
+
+    app = FakeApp()
+    app.sessionDropdownChanged_(FakePopup())
+    app.sessionButtonClicked_(FakeButton())
+
+    assert selected == ["task-old", "task-new"]
+
+
+def test_select_session_keeps_manual_choice_and_refreshes_through_one_method():
+    refreshed = []
+
+    class FakeApp:
+        _current_session_id = "before"
+        _panel_visible = True
+
+        def _sync_session_controls(self):
+            refreshed.append(("controls", self._current_session_id))
+
+        def _refresh_data(self):
+            refreshed.append(("data", self._current_session_id))
+
+    app = FakeApp()
+    CopilotNativeApp._select_session(app, "chosen")
+
+    assert app._current_session_id == "chosen"
+    assert refreshed == [("controls", "chosen"), ("data", "chosen")]
+
+
+def test_select_session_immediately_updates_real_popup_and_recent_button_selection_offline():
+    floating_native.NSApplication.sharedApplication()
+    session_bar = floating_native.NSView.alloc().initWithFrame_(
+        floating_native.NSMakeRect(0, 0, 356, 72)
+    )
+    sessions = [
+        {
+            "session_id": "task-a",
+            "session_title": "A",
+            "group_type": "task",
+            "last_activity_at": 20,
+        },
+        {
+            "session_id": "task-b",
+            "session_title": "B",
+            "group_type": "task",
+            "last_activity_at": 10,
+        },
+    ]
+
+    class FakeApp:
+        _rebuild_session_bar = CopilotNativeApp._rebuild_session_bar
+        _sync_session_controls = CopilotNativeApp._sync_session_controls
+        _sessions_list = sessions
+        _sessions = {
+            "task-a": {"unread": 0},
+            "task-b": {"unread": 0},
+        }
+        _current_session_id = "task-a"
+        _ask_generation = 0
+
+        def _refresh_data(self):
+            # 离线时刷新无法启动，但本地选中反馈不能回滚或等待。
+            return False
+
+    app = FakeApp()
+    app.session_bar = session_bar
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", floating_native.objc.ObjCPointerWarning)
+        CopilotNativeApp._rebuild_session_bar(app)
+        CopilotNativeApp._select_session(app, "task-b")
+
+    assert app.session_popup.indexOfSelectedItem() == 1
+    assert [int(button.state()) for button in app._recent_session_buttons] == [0, 1]
+
+
+def test_analysis_empty_state_distinguishes_local_sync_service_and_llm_states():
+    synced = {"session-1"}
+
+    assert floating_native._analysis_empty_state([], None, synced, True, "ready") == "no_local_sessions"
+    assert floating_native._analysis_empty_state(
+        [{"session_id": "session-1"}], "session-1", set(), True, "ready"
+    ) == "not_synced"
+    assert floating_native._analysis_empty_state(
+        [{"session_id": "session-1"}], "session-1", synced, True, "ready"
+    ) == "synced_no_analysis"
+    assert floating_native._analysis_empty_state(
+        [{"session_id": "session-1"}], "session-1", synced, False, "ready"
+    ) == "service_unavailable"
+    assert floating_native._analysis_empty_state(
+        [{"session_id": "session-1"}], "session-1", synced, True, "missing_api_key"
+    ) == "llm_unavailable"
+
+    for state in (
+        "no_local_sessions",
+        "not_synced",
+        "synced_no_analysis",
+        "service_unavailable",
+        "llm_unavailable",
+    ):
+        message = floating_native._empty_state_message(state)
+        assert message
+        assert "当前对话暂无分析记录" not in message
+
+
+def test_structured_student_ask_response_explains_context_and_llm_status():
+    text, context_status, llm_status = floating_native._format_student_ask_response({
+        "answer": "先检查环境。",
+        "context_status": "not_synced",
+        "llm_status": "missing_api_key",
+        "retry_guidance": "请启用 LLM 后重试。",
+    })
+
+    assert context_status == "not_synced"
+    assert llm_status == "missing_api_key"
+    assert "尚未同步" in text
+    assert "LLM" in text
+    assert "先检查环境。" in text
+    assert "请启用 LLM 后重试。" in text
+
+
+def test_structured_student_ask_response_reports_diagnostics_actually_attached():
+    text, _context_status, _llm_status = floating_native._format_student_ask_response({
+        "answer": "先检查权限。",
+        "context_status": "ready",
+        "llm_status": "ready",
+        "diagnostics_attached": True,
+    })
+
+    assert "本次已附加脱敏诊断信息" in text
+
+
+def test_structured_student_ask_response_reports_collector_failure_as_not_attached():
+    text, _context_status, _llm_status = floating_native._format_student_ask_response({
+        "answer": "诊断收集失败后仍然继续回答。",
+        "context_status": "ready",
+        "llm_status": "ready",
+        "diagnostics_attached": False,
+    })
+
+    assert "本次未附加诊断信息" in text
+
+
+def test_structured_student_ask_response_reports_rejected_diagnostic_schema_as_not_attached():
+    text, _context_status, _llm_status = floating_native._format_student_ask_response({
+        "answer": "诊断包 schema 无效，已忽略诊断包并继续回答。",
+        "context_status": "ready",
+        "llm_status": "ready",
+        "diagnostics_attached": False,
+    })
+
+    assert "本次未附加诊断信息" in text
+
+
+def test_legacy_student_ask_response_remains_compatible():
+    text, context_status, llm_status = floating_native._format_student_ask_response({
+        "answer": "旧服务返回的答案",
+    })
+
+    assert "旧服务返回的答案" in text
+    assert "unknown" in text
+    assert "未报告 LLM 状态" in text
+    assert context_status == "ready"
+    assert llm_status == "unknown"
+
+
+def test_all_context_status_values_are_preserved_and_explained():
+    expected_phrases = {
+        "ready": None,
+        "not_synced": "尚未同步",
+        "without_session": "没有选择对话",
+        "no_context": "没有可用的对话上下文",
+    }
+
+    for status, phrase in expected_phrases.items():
+        text, context_status, llm_status = floating_native._format_student_ask_response({
+            "answer": "可读回答",
+            "context_status": status,
+            "llm_status": "ready",
+        })
+        assert context_status == status
+        assert llm_status == "ready"
+        assert "可读回答" in text
+        if phrase:
+            assert phrase in text
+        else:
+            assert text == "可读回答"
+
+
+def test_all_llm_status_values_are_preserved_and_nonready_values_are_explained():
+    statuses = (
+        "ready",
+        "disabled",
+        "missing_api_key",
+        "misconfigured",
+        "timeout",
+        "upstream_error",
+    )
+
+    for status in statuses:
+        text, context_status, llm_status = floating_native._format_student_ask_response({
+            "answer": "回退答案",
+            "context_status": "ready",
+            "llm_status": status,
+        })
+        assert context_status == "ready"
+        assert llm_status == status
+        assert "回退答案" in text
+        if status == "ready":
+            assert text == "回退答案"
+        else:
+            assert f"（{status}）" in text
+            assert "LLM 暂不可用" in text
+
+
+def test_default_diagnostic_collector_calls_student_core_implementation(monkeypatch):
+    import copilot.student_core.diagnostics as diagnostics
+
+    calls = []
+
+    def fake_collect():
+        calls.append(True)
+        return {"version": "diagnostic-bundle/v1", "system": {"os": "test"}}
+
+    monkeypatch.setattr(diagnostics, "collect_diagnostic_bundle", fake_collect)
+
+    assert floating_native._collect_diagnostic_bundle() == {
+        "version": "diagnostic-bundle/v1",
+        "system": {"os": "test"},
+    }
+    assert calls == [True]
+
+
+def test_local_workbuddy_failure_is_recorded_in_real_redacted_diagnostic_ring(monkeypatch):
+    import copilot.student_core.diagnostics as diagnostics
+
+    diagnostics.clear_recent_errors()
+    monkeypatch.setattr(
+        floating_native.wb_sync,
+        "read_sessions",
+        lambda limit: (_ for _ in ()).throw(
+            RuntimeError("token=raw-secret-value /Users/alice/private")
+        ),
+    )
+    try:
+        class FakeApp:
+            pass
+
+        assert CopilotNativeApp._read_local_current_session(FakeApp()) is None
+        bundle = diagnostics.collect_diagnostic_bundle(
+            required_env_names=(),
+            required_tools=(),
+            relevant_paths=(),
+        )
+        recent = bundle["recent_errors"]
+        assert recent[-1]["component"] == "workbuddy_read"
+        assert recent[-1]["type"] == "RuntimeError"
+        assert "raw-secret-value" not in json.dumps(recent, ensure_ascii=False)
+        assert "[REDACTED]" in json.dumps(recent, ensure_ascii=False)
+    finally:
+        diagnostics.clear_recent_errors()
+
+
+def test_analysis_panel_diagnostics_checkbox_defaults_on():
+    class FakeIconPanel:
+        def frame(self):
+            return floating_native.NSMakeRect(100, 100, 48, 48)
+
+    floating_native.NSApplication.sharedApplication()
+    app = CopilotNativeApp.alloc().init()
+    app.icon_panel = FakeIconPanel()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", floating_native.objc.ObjCPointerWarning)
+        app._create_analysis_panel()
+    try:
+        assert app.diagnostics_checkbox.state() == floating_native.NSControlStateValueOn
+    finally:
+        app.analysis_panel.orderOut_(None)
+
+
 def test_student_ask_worker_posts_context_and_dispatches_answer(monkeypatch):
     calls = []
 
@@ -300,20 +1524,303 @@ def test_student_ask_worker_posts_context_and_dispatches_answer(monkeypatch):
                 "student_id": "student-a",
                 "session_id": "sess-1",
                 "question": "怎么定位循环边界？",
+                "include_diagnostics": True,
+                "diagnostic_bundle": {"environment": {"token": "<redacted>"}},
             }
             assert timeout >= 10
-            return {"ask_id": 12, "answer": "先打印最后一次循环的 index。"}
+            return {
+                "ask_id": 12,
+                "answer": "先打印最后一次循环的 index。",
+                "context_status": "ready",
+                "llm_status": "ready",
+            }
 
     monkeypatch.setattr(floating_native.AppHelper, "callAfter", fake_call_after)
+    monkeypatch.setattr(
+        floating_native,
+        "_collect_diagnostic_bundle",
+        lambda: {"environment": {"token": "<redacted>"}},
+    )
 
     app = FakeApp()
-    CopilotNativeApp._send_student_ask_worker(app, "怎么定位循环边界？", "sess-1")
+    CopilotNativeApp._send_student_ask_worker(app, "怎么定位循环边界？", "sess-1", True)
 
     assert len(calls) == 1
     func, args = calls[0]
     assert func.__self__ is app
     assert func.__func__ is CopilotNativeApp._handle_ask_answer
-    assert args == ("怎么定位循环边界？", "先打印最后一次循环的 index。", 12)
+    assert args == (
+        "怎么定位循环边界？",
+        "先打印最后一次循环的 index。",
+        12,
+        "ready",
+        "ready",
+    )
+
+
+def test_student_ask_worker_omits_diagnostic_bundle_when_checkbox_is_off(monkeypatch):
+    posted = []
+    calls = []
+
+    class FakeApp:
+        _student_id = "student-a"
+        _handle_ask_answer = CopilotNativeApp._handle_ask_answer
+        _handle_ask_error = CopilotNativeApp._handle_ask_error
+
+        def _post_json(self, path, payload, *, timeout):
+            posted.append(payload)
+            return {"ask_id": 3, "answer": "不带诊断也可以回答。"}
+
+    monkeypatch.setattr(
+        floating_native,
+        "_collect_diagnostic_bundle",
+        lambda: (_ for _ in ()).throw(AssertionError("不应收集诊断")),
+    )
+    monkeypatch.setattr(
+        floating_native.AppHelper,
+        "callAfter",
+        lambda func, *args: calls.append((func, args)),
+    )
+
+    CopilotNativeApp._send_student_ask_worker(FakeApp(), "hi", "sess-1", False)
+
+    assert posted == [{
+        "student_id": "student-a",
+        "question": "hi",
+        "session_id": "sess-1",
+        "include_diagnostics": False,
+    }]
+    assert "不带诊断也可以回答。" in calls[0][1][1]
+    assert "unknown" in calls[0][1][1]
+
+
+def test_sync_then_ask_worker_uploads_selected_session_before_asking(monkeypatch):
+    events = []
+
+    def fake_upload(cfg, student_id, mode, *, session_id):
+        events.append(("upload", cfg, student_id, mode, session_id))
+        return {"total": 1, "synced": 1, "skipped": 0, "failed": 0}
+
+    class FakeApp:
+        cfg = {"student_id": "student-a"}
+        _student_id = "student-a"
+
+        def _send_student_ask_worker(
+            self, question, session_id, include_diagnostics, context_mode=None
+        ):
+            events.append((
+                "ask", question, session_id, include_diagnostics, context_mode
+            ))
+
+    monkeypatch.setattr(floating_native.wb_upload, "upload_conversations", fake_upload)
+
+    app = FakeApp()
+    CopilotNativeApp._sync_then_send_student_ask_worker(
+        app, "为什么失败？", "sess-1", True
+    )
+
+    assert events == [
+        ("upload", app.cfg, "student-a", "missing", "sess-1"),
+        ("ask", "为什么失败？", "sess-1", True, "sync_then_ask"),
+    ]
+
+
+def test_without_session_context_mode_is_explicit_and_omits_session(monkeypatch):
+    posted = []
+
+    class FakeApp:
+        _student_id = "student-a"
+        _handle_ask_answer = CopilotNativeApp._handle_ask_answer
+        _handle_ask_error = CopilotNativeApp._handle_ask_error
+
+        def _post_json(self, path, payload, *, timeout):
+            posted.append(payload)
+            return {"answer": "已不带对话回答。", "context_status": "without_session"}
+
+    monkeypatch.setattr(
+        floating_native.AppHelper, "callAfter", lambda func, *args: None
+    )
+
+    CopilotNativeApp._send_student_ask_worker(
+        FakeApp(), "hi", None, False, "without_session"
+    )
+
+    assert posted == [{
+        "student_id": "student-a",
+        "question": "hi",
+        "include_diagnostics": False,
+        "context_mode": "without_session",
+    }]
+
+
+def test_copy_answer_action_writes_the_complete_visible_answer(monkeypatch):
+    copied = []
+
+    class FakeAnswerView:
+        def string(self):
+            return "你问：hi\n\nCopilot：完整回答"
+
+    class FakeApp:
+        copyAnswerClicked_ = CopilotNativeApp.copyAnswerClicked_
+        ask_answer_view = FakeAnswerView()
+
+    monkeypatch.setattr(
+        floating_native,
+        "_copy_text_to_pasteboard",
+        lambda text, pasteboard=None: copied.append(text) or True,
+    )
+
+    FakeApp().copyAnswerClicked_(None)
+
+    assert copied == ["你问：hi\n\nCopilot：完整回答"]
+
+
+def test_single_inflight_guard_blocks_second_ask_across_all_entry_paths(monkeypatch):
+    threads = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, daemon):
+            threads.append((target, args, daemon))
+
+        def start(self):
+            pass
+
+    class FakeApp:
+        _student_id = "student-a"
+        _current_session_id = "session-1"
+        _ask_generation = 0
+        _ask_inflight_generation = None
+        controls = []
+        answers = []
+
+        def _diagnostics_enabled(self):
+            return True
+
+        def _set_ask_controls_enabled(self, enabled):
+            self.controls.append(enabled)
+
+        def _set_ask_answer_text(self, text):
+            self.answers.append(text)
+
+        def _send_student_ask_worker(self, *args):
+            raise AssertionError("fake thread must not execute")
+
+    monkeypatch.setattr(floating_native.threading, "Thread", FakeThread)
+
+    app = FakeApp()
+    first = CopilotNativeApp._start_student_ask(app, "first", "session-1")
+    second = CopilotNativeApp._start_student_ask(
+        app, "second", None, context_mode="without_session"
+    )
+
+    assert first is True
+    assert second is False
+    assert len(threads) == 1
+    assert app._ask_inflight_generation == 1
+    assert app.controls == [False]
+    assert any("正在处理" in text for text in app.answers)
+
+
+def test_student_ask_start_with_empty_student_id_fails_closed_before_thread_or_http(monkeypatch):
+    threads = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            threads.append(kwargs)
+
+        def start(self):
+            raise AssertionError("缺少 student_id 时不得启动请求线程")
+
+    class FakeApp:
+        _student_id = ""
+        _ask_generation = 0
+        _ask_inflight_generation = None
+        answers = []
+
+        def _set_ask_answer_text(self, text):
+            self.answers.append(text)
+
+        def _set_ask_controls_enabled(self, enabled):
+            raise AssertionError("不应进入请求中状态")
+
+    monkeypatch.setattr(floating_native.threading, "Thread", FakeThread)
+
+    app = FakeApp()
+    assert CopilotNativeApp._start_student_ask(app, "hi", None) is False
+    assert threads == []
+    assert app._ask_inflight_generation is None
+    assert any("student_id" in text for text in app.answers)
+
+
+def test_late_ask_callback_cannot_overwrite_new_session_answer_or_status():
+    rendered = []
+    controls = []
+
+    class FakeApp:
+        _current_session_id = "session-2"
+        _ask_generation = 2
+        _ask_inflight_generation = 2
+        _items = [{"raw": "keep cards stable"}]
+        _service_available = True
+        _context_status = "ready"
+        _llm_status = "ready"
+
+        def _set_ask_controls_enabled(self, enabled):
+            controls.append(enabled)
+
+        def _set_ask_answer_text(self, text):
+            rendered.append(text)
+
+        def _end_ask_focus(self):
+            pass
+
+    app = FakeApp()
+    CopilotNativeApp._handle_ask_answer(
+        app,
+        "new question",
+        "new answer",
+        2,
+        "ready",
+        "ready",
+        2,
+        "session-2",
+    )
+    assert rendered[-1].endswith("new answer")
+
+    app._ask_inflight_generation = 1
+    CopilotNativeApp._handle_ask_answer(
+        app,
+        "old question",
+        "old answer",
+        1,
+        "not_synced",
+        "missing_api_key",
+        1,
+        "session-1",
+    )
+
+    assert rendered == ["你问：new question\n\nCopilot：new answer"]
+    assert app._context_status == "ready"
+    assert app._llm_status == "ready"
+    assert controls == [True, True]
+
+
+def test_end_ask_focus_keeps_panel_keyboard_focus_available_for_text_selection():
+    focus_values = []
+
+    class FakePanel:
+        def makeFirstResponder_(self, responder):
+            assert responder is None
+
+        def setAllowsKeyboardFocus_(self, value):
+            focus_values.append(value)
+
+    class FakeApp:
+        analysis_panel = FakePanel()
+
+    CopilotNativeApp._end_ask_focus(FakeApp())
+
+    assert focus_values == [True]
 
 
 def test_student_ask_worker_dispatches_friendly_error(monkeypatch):

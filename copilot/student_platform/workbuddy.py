@@ -6,6 +6,7 @@ guess an operating-system-specific WorkBuddy location.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass, field
 import json
 import os
@@ -16,6 +17,9 @@ from typing import Any
 
 
 MAX_TRANSCRIPT_CANDIDATES = 512
+# Safety cap for each individual transcript.  A student's complete projects
+# directory may legitimately contain many transcripts whose aggregate size is
+# much larger than this value.
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 DESCRIPTOR_TRAVERSAL_SUPPORTED = (
     getattr(os, "O_NOFOLLOW", None) is not None
@@ -105,7 +109,6 @@ class _TranscriptCandidate:
     relative_path: Path
     device: int
     inode: int
-    content: bytes
 
 
 def _ms_to_seconds(value: Any) -> float:
@@ -202,6 +205,7 @@ class WorkBuddyDataAdapter:
         self._transcript_index: dict[str, tuple[_TranscriptCandidate, ...]] | None = None
         self._transcript_index_failure: AdapterFailure | None = None
         self._transcript_root: Path | None = None
+        self._transcript_root_fd: int | None = None
 
     def probe(self) -> ProbeResult:
         """Validate the known local DB contract without treating errors as empty."""
@@ -214,7 +218,7 @@ class WorkBuddyDataAdapter:
                 return self._probe_failure(
                     "not_installed", "WorkBuddy database is missing"
                 )
-            with self._connect_readonly() as connection:
+            with closing(self._connect_readonly()) as connection:
                 rows = connection.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 ).fetchall()
@@ -258,7 +262,7 @@ class WorkBuddyDataAdapter:
         if limit < 1:
             return []
         try:
-            with self._connect_readonly() as connection:
+            with closing(self._connect_readonly()) as connection:
                 where = "" if include_deleted else "WHERE deleted_at IS NULL"
                 session_rows = connection.execute(
                     f"""SELECT id, cwd, title, custom_title, created_at, last_activity_at, deleted_at
@@ -305,7 +309,7 @@ class WorkBuddyDataAdapter:
         if limit < 1:
             return []
         try:
-            with self._connect_readonly() as connection:
+            with closing(self._connect_readonly()) as connection:
                 rows = connection.execute(
                     "SELECT * FROM workspaces ORDER BY last_opened_at DESC LIMIT ?", (limit,)
                 ).fetchall()
@@ -322,24 +326,40 @@ class WorkBuddyDataAdapter:
             return TranscriptReadResult(
                 failure=AdapterFailure("transcript_not_found", "session id is missing")
             )
-        index, root, failure = self._ensure_transcript_index()
+        index, root, fresh_parent_fds, failure = self._ensure_transcript_index(session_id)
         if failure is not None:
             return TranscriptReadResult(failure=failure)
         matches = index.get(session_id, ())
         if not matches:
+            self._close_descriptors(fresh_parent_fds.values())
             return TranscriptReadResult(
                 failure=AdapterFailure("transcript_not_found", "no transcript matches session id")
             )
         if len(matches) > 1:
+            self._close_descriptors(fresh_parent_fds.values())
             return TranscriptReadResult(
                 failure=AdapterFailure(
                     "transcript_ambiguous", "multiple transcripts match the same session id"
                 )
             )
         assert root is not None
-        return TranscriptReadResult(
-            content=matches[0].content.decode("utf-8", errors="replace"),
-        )
+        candidate = matches[0]
+        fresh_parent_fd = fresh_parent_fds.pop(candidate, None)
+        self._close_descriptors(fresh_parent_fds.values())
+        data, read_failure = self._read_indexed_candidate(candidate, fresh_parent_fd)
+        if read_failure is not None:
+            return TranscriptReadResult(failure=read_failure)
+        session_ids, metadata_failure = self._session_ids_from_jsonl(data)
+        if metadata_failure is not None:
+            return TranscriptReadResult(failure=metadata_failure)
+        if session_ids != frozenset({session_id}):
+            return TranscriptReadResult(
+                failure=AdapterFailure(
+                    "transcript_index_incomplete",
+                    "transcript session metadata changed after indexing",
+                )
+            )
+        return TranscriptReadResult(content=data.decode("utf-8"))
 
     def transcript_path_for_session(self, session_id: str) -> Path | None:
         """Deprecated compatibility API; verified transcripts expose content, never paths."""
@@ -357,25 +377,41 @@ class WorkBuddyDataAdapter:
             )
         )
 
+    def close(self) -> None:
+        """Release the inode-pinned projects descriptor held by a built index."""
+        if self._transcript_root_fd is not None:
+            os.close(self._transcript_root_fd)
+            self._transcript_root_fd = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
     def _ensure_transcript_index(
-        self,
+        self, requested_session_id: str,
     ) -> tuple[
-        dict[str, tuple[_TranscriptCandidate, ...]], Path | None, AdapterFailure | None
+        dict[str, tuple[_TranscriptCandidate, ...]],
+        Path | None,
+        dict[_TranscriptCandidate, int],
+        AdapterFailure | None,
     ]:
-        """Build one bounded, metadata-verified index for this adapter instance."""
+        """Build one bounded metadata index without retaining transcript bodies."""
         if self._transcript_index is not None or self._transcript_index_failure is not None:
             return (
                 self._transcript_index or {},
                 self._transcript_root,
+                {},
                 self._transcript_index_failure,
             )
         root, root_stat, root_failure = self._projects_root()
         if root_failure is not None:
             self._transcript_index_failure = root_failure
-            return {}, None, root_failure
+            return {}, None, {}, root_failure
         if root is None:
             self._transcript_index = {}
-            return {}, None, None
+            return {}, None, {}, None
 
         assert root_stat is not None
         root_fd, _opened_root_stat, open_failure = self._open_projects_root_descriptor(
@@ -386,35 +422,51 @@ class WorkBuddyDataAdapter:
         assert root_fd is not None
 
         index: dict[str, list[_TranscriptCandidate]] = {}
+        fresh_parent_fds: dict[_TranscriptCandidate, int] = {}
         candidates = 0
-        bytes_read = 0
+        keep_root_fd = False
         try:
-            candidates, bytes_read, scan_failure = self._scan_index_directory(
-                root_fd, Path(), index, candidates, bytes_read
+            candidates, scan_failure = self._scan_index_directory(
+                root_fd,
+                Path(),
+                index,
+                candidates,
+                requested_session_id,
+                fresh_parent_fds,
             )
             if scan_failure is not None:
+                self._close_descriptors(fresh_parent_fds.values())
                 return self._set_index_failure(scan_failure.code, scan_failure.message)
+            keep_root_fd = True
         except BaseException as exc:
+            self._close_descriptors(fresh_parent_fds.values())
             failure = self._failure_from_exception(exc)
             return self._set_index_failure(failure.code, failure.message)
         finally:
-            os.close(root_fd)
+            if not keep_root_fd:
+                os.close(root_fd)
 
         self._transcript_root = root
+        self._transcript_root_fd = root_fd
         self._transcript_index = {
             session_id: tuple(
                 sorted(paths, key=lambda candidate: candidate.relative_path.as_posix())
             )
             for session_id, paths in index.items()
         }
-        return self._transcript_index, root, None
+        return self._transcript_index, root, fresh_parent_fds, None
 
     def _set_index_failure(
         self, code: str, message: str
-    ) -> tuple[dict[str, tuple[_TranscriptCandidate, ...]], None, AdapterFailure]:
+    ) -> tuple[
+        dict[str, tuple[_TranscriptCandidate, ...]],
+        None,
+        dict[_TranscriptCandidate, int],
+        AdapterFailure,
+    ]:
         failure = AdapterFailure(code, message)
         self._transcript_index_failure = failure
-        return {}, None, failure
+        return {}, None, {}, failure
 
     def _projects_root(
         self,
@@ -470,67 +522,142 @@ class WorkBuddyDataAdapter:
         relative_directory: Path,
         index: dict[str, list[_TranscriptCandidate]],
         candidates: int,
-        bytes_read: int,
-    ) -> tuple[int, int, AdapterFailure | None]:
+        requested_session_id: str,
+        fresh_parent_fds: dict[_TranscriptCandidate, int],
+    ) -> tuple[int, AdapterFailure | None]:
         try:
             names = sorted(os.listdir(directory_fd))
         except BaseException as exc:
-            return candidates, bytes_read, self._failure_from_exception(exc)
+            return candidates, self._failure_from_exception(exc)
         for name in names:
             try:
                 entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             except FileNotFoundError:
-                return candidates, bytes_read, AdapterFailure(
+                return candidates, AdapterFailure(
                     "transcript_index_incomplete", "transcript changed while indexing"
                 )
             except BaseException as exc:
-                return candidates, bytes_read, self._failure_from_exception(exc)
+                return candidates, self._failure_from_exception(exc)
             if stat.S_ISLNK(entry.st_mode):
                 continue
             if stat.S_ISDIR(entry.st_mode):
                 child_fd, child_failure = self._open_child_directory(directory_fd, name, entry)
                 if child_failure is not None:
-                    return candidates, bytes_read, child_failure
+                    return candidates, child_failure
                 assert child_fd is not None
                 try:
-                    candidates, bytes_read, scan_failure = self._scan_index_directory(
+                    candidates, scan_failure = self._scan_index_directory(
                         child_fd,
                         relative_directory / name,
                         index,
                         candidates,
-                        bytes_read,
+                        requested_session_id,
+                        fresh_parent_fds,
                     )
                 finally:
                     os.close(child_fd)
                 if scan_failure is not None:
-                    return candidates, bytes_read, scan_failure
+                    return candidates, scan_failure
                 continue
             if not stat.S_ISREG(entry.st_mode) or not name.lower().endswith(".jsonl"):
                 continue
             candidates += 1
             if candidates > self.max_transcript_candidates:
-                return candidates, bytes_read, AdapterFailure(
+                return candidates, AdapterFailure(
                     "transcript_index_incomplete", "transcript candidate limit exceeded"
                 )
             data, opened, read_failure = self._read_file_at(
-                directory_fd, name, self.max_transcript_bytes - bytes_read, entry
+                directory_fd, name, self.max_transcript_bytes, entry
             )
             if read_failure is not None:
-                return candidates, bytes_read, read_failure
+                return candidates, read_failure
             assert opened is not None
-            bytes_read += len(data)
             session_ids, metadata_failure = self._session_ids_from_jsonl(data)
             if metadata_failure is not None:
-                return candidates, bytes_read, metadata_failure
+                return candidates, metadata_failure
             candidate = _TranscriptCandidate(
                 relative_path=relative_directory / name,
                 device=opened.st_dev,
                 inode=opened.st_ino,
-                content=data,
             )
+            if requested_session_id in session_ids:
+                existing_matches = index.get(requested_session_id, ())
+                if not existing_matches:
+                    fresh_parent_fds[candidate] = os.dup(directory_fd)
+                else:
+                    self._close_descriptors(fresh_parent_fds.values())
+                    fresh_parent_fds.clear()
             for found_session_id in session_ids:
                 index.setdefault(found_session_id, []).append(candidate)
-        return candidates, bytes_read, None
+        return candidates, None
+
+    def _read_indexed_candidate(
+        self,
+        candidate: _TranscriptCandidate,
+        fresh_parent_fd: int | None,
+    ) -> tuple[bytes, AdapterFailure | None]:
+        """Reopen one indexed file through pinned descriptors and verify its inode."""
+        parent_fd = fresh_parent_fd
+        if parent_fd is None:
+            parent_fd, open_failure = self._open_indexed_candidate_parent(candidate)
+            if open_failure is not None:
+                return b"", open_failure
+        assert parent_fd is not None
+        try:
+            data, _opened, read_failure = self._read_file_at(
+                parent_fd,
+                candidate.relative_path.name,
+                self.max_transcript_bytes,
+                candidate,
+            )
+            return data, read_failure
+        finally:
+            os.close(parent_fd)
+
+    def _open_indexed_candidate_parent(
+        self, candidate: _TranscriptCandidate
+    ) -> tuple[int | None, AdapterFailure | None]:
+        if self._transcript_root_fd is None:
+            return None, AdapterFailure(
+                "transcript_index_incomplete", "transcript index root is unavailable"
+            )
+        try:
+            directory_fd = os.dup(self._transcript_root_fd)
+        except BaseException as exc:
+            return None, self._failure_from_exception(exc)
+        keep_fd = False
+        try:
+            for part in candidate.relative_path.parent.parts:
+                try:
+                    entry = os.stat(part, dir_fd=directory_fd, follow_symlinks=False)
+                except BaseException as exc:
+                    return None, self._failure_from_exception(exc)
+                if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+                    return None, AdapterFailure(
+                        "transcript_index_incomplete",
+                        "transcript directory changed after indexing",
+                    )
+                child_fd, child_failure = self._open_child_directory(
+                    directory_fd, part, entry
+                )
+                if child_failure is not None:
+                    return None, child_failure
+                assert child_fd is not None
+                os.close(directory_fd)
+                directory_fd = child_fd
+            keep_fd = True
+            return directory_fd, None
+        finally:
+            if not keep_fd:
+                os.close(directory_fd)
+
+    @staticmethod
+    def _close_descriptors(descriptors: Any) -> None:
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
     def _open_child_directory(
         self, directory_fd: int, name: str, expected: os.stat_result
@@ -558,10 +685,10 @@ class WorkBuddyDataAdapter:
         self,
         directory_fd: int,
         name: str,
-        remaining: int,
+        max_bytes: int,
         expected: os.stat_result | _TranscriptCandidate,
     ) -> tuple[bytes, os.stat_result | None, AdapterFailure | None]:
-        if remaining < 0:
+        if max_bytes < 1:
             return b"", None, AdapterFailure(
                 "transcript_index_incomplete", "transcript byte limit exceeded"
             )
@@ -581,13 +708,13 @@ class WorkBuddyDataAdapter:
                 )
             with os.fdopen(fd, "rb", closefd=True) as handle:
                 fd = None
-                data = handle.read(remaining + 1)
+                data = handle.read(max_bytes + 1)
         except BaseException as exc:
             return b"", None, self._failure_from_exception(exc)
         finally:
             if fd is not None:
                 os.close(fd)
-        if len(data) > remaining:
+        if len(data) > max_bytes:
             return b"", None, AdapterFailure(
                 "transcript_index_incomplete", "transcript byte limit exceeded"
             )

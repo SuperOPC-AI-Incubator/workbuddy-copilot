@@ -12,12 +12,14 @@ import pytest
 
 from copilot.llm import (
     AnalysisOutcome,
+    QuestionAnswerOutcome,
     build_system_prompt,
     build_user_prompt,
     _parse_json_content,
     _fallback,
     analyze,
     answer_question,
+    answer_question_with_status,
     summarize_reply,
 )
 from copilot.transcript import TranscriptSnapshot, Message
@@ -307,6 +309,181 @@ class TestAnswerQuestion:
         answer = await answer_question(cfg, "pytest 为什么失败？", [])
         assert "LLM" in answer
         assert "问题" in answer
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("llm_config", "expected_status"),
+        [
+            ({"enable_llm": False, "api_key": "sk-x", "model": "x", "api_base": "x"}, "disabled"),
+            ({"enable_llm": True, "api_key": "", "model": "x", "api_base": "x"}, "missing_api_key"),
+            ({"enable_llm": True, "api_key": "sk-x", "model": "", "api_base": "x"}, "misconfigured"),
+        ],
+    )
+    async def test_structured_capability_status_before_provider_call(
+        self, llm_config, expected_status
+    ):
+        result = await answer_question_with_status(
+            {"llm": llm_config}, "怎么排查？", []
+        )
+
+        assert isinstance(result, QuestionAnswerOutcome)
+        assert result.status == expected_status
+        assert result.answer
+        assert result.retry_guidance
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "api_base",
+        [
+            pytest.param("not-a-url", id="missing-scheme-and-host"),
+            pytest.param("https:///v1", id="missing-host"),
+            pytest.param("ftp://llm.example/v1", id="non-http-scheme"),
+            pytest.param(
+                "https://llm.example:abc/v1",
+                id="non-numeric-port",
+            ),
+            pytest.param(
+                "https://llm.example:70000/v1",
+                id="out-of-range-port",
+            ),
+        ],
+    )
+    async def test_invalid_api_base_is_misconfigured_before_provider_call(
+        self, monkeypatch, api_base
+    ):
+        class UnexpectedClient:
+            def __init__(self, timeout):
+                raise AssertionError("invalid api_base must not reach the provider")
+
+        monkeypatch.setattr("copilot.llm.httpx.AsyncClient", UnexpectedClient)
+
+        result = await answer_question_with_status(
+            {
+                "llm": {
+                    "enable_llm": True,
+                    "api_key": "sk-test",
+                    "model": "model",
+                    "api_base": api_base,
+                }
+            },
+            "怎么排查？",
+            [],
+        )
+
+        assert result.status == "misconfigured"
+        assert result.answer
+        assert result.retry_guidance
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("api_base", ["http://llm.example/v1", "https://llm.example/v1"])
+    async def test_provider_success_returns_ready_status(self, monkeypatch, api_base):
+        captured = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "先检查 Python 版本。"}}]}
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json, headers):
+                captured["url"] = url
+                return FakeResponse()
+
+        monkeypatch.setattr("copilot.llm.httpx.AsyncClient", FakeClient)
+        result = await answer_question_with_status(
+            {
+                "llm": {
+                    "enable_llm": True,
+                    "api_key": "sk-test",
+                    "model": "model",
+                    "api_base": api_base,
+                }
+            },
+            "怎么排查？",
+            [],
+        )
+
+        assert result.status == "ready"
+        assert result.answer == "先检查 Python 版本。"
+        assert result.retry_guidance == ""
+        assert captured["url"] == api_base + "/chat/completions"
+
+    @pytest.mark.asyncio
+    async def test_timeout_and_upstream_error_are_distinct(self, monkeypatch):
+        config = {
+            "llm": {
+                "enable_llm": True,
+                "api_key": "sk-test",
+                "model": "model",
+                "api_base": "https://llm.example/v1",
+            }
+        }
+
+        class TimeoutClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json, headers):
+                raise httpx.ReadTimeout("late")
+
+        monkeypatch.setattr("copilot.llm.httpx.AsyncClient", TimeoutClient)
+        timeout_result = await answer_question_with_status(config, "hi", [])
+        assert timeout_result.status == "timeout"
+
+        class ErrorClient(TimeoutClient):
+            async def post(self, url, json, headers):
+                raise httpx.ConnectError("offline")
+
+        monkeypatch.setattr("copilot.llm.httpx.AsyncClient", ErrorClient)
+        upstream_result = await answer_question_with_status(config, "hi", [])
+        assert upstream_result.status == "upstream_error"
+
+    def test_question_context_drops_whole_old_messages_instead_of_slicing_them(self):
+        from copilot.llm import _format_question_context
+
+        context = [
+            {"role": "user", "content": "OLD-" + "x" * 80},
+            {"role": "assistant", "content": "LATEST-COMPLETE"},
+        ]
+
+        rendered = _format_question_context(context, max_chars=40)
+
+        assert "LATEST-COMPLETE" in rendered
+        assert "OLD-" not in rendered
+
+    def test_question_prompt_keeps_every_context_layer_within_normal_budgets(self):
+        from copilot.llm import build_question_prompt
+
+        prompt = build_question_prompt(
+            "help",
+            [
+                {"role": "user", "content": "SESSION-" + "s" * 2_500},
+                {"role": "analysis", "content": "ANALYSIS-" + "a" * 500},
+                {"role": "prior_copilot", "content": "PRIOR-" + "p" * 1_000},
+                {"role": "diagnostics", "content": "DIAGNOSTIC-" + "d" * 3_000},
+                {"role": "runtime_guidance", "content": "GUIDANCE-" + "g" * 800},
+            ],
+        )
+
+        for marker in ("SESSION-", "ANALYSIS-", "PRIOR-", "DIAGNOSTIC-", "GUIDANCE-"):
+            assert marker in prompt
 
 
 class TestSummarizeReply:
