@@ -243,6 +243,24 @@ function MentorDesk() {
     }
   };
 
+  const callMentor = async () => {
+    if (role !== "student" || !currentSessionId || aiBusy) return;
+    const note = window.prompt("向导师说明一下情况（可留空）：", "") ?? "";
+    const text = note.trim()
+      ? `🆘 呼叫导师：${note.trim()}`
+      : "🆘 学员请求导师协助";
+    const { data: userRes } = await supabase.auth.getUser();
+    const { error } = await supabase.from("timeline_items").insert({
+      session_id: currentSessionId,
+      kind: "diagnosis",
+      text,
+      severity: "error",
+      tag: "呼叫导师",
+      author_id: userRes.user?.id ?? null,
+    });
+    if (error) alert("呼叫失败：" + error.message);
+  };
+
   const createSession = async () => {
     if (role !== "student" || !currentStudentId) return;
     const title = prompt("新对话标题？", "PLC 学习会话");
@@ -299,6 +317,7 @@ function MentorDesk() {
           role={role}
           aiBusy={aiBusy}
           onDraftTip={draftTip}
+          onCallMentor={callMentor}
         />
       </main>
     </div>
@@ -600,6 +619,7 @@ function TimelinePanel({
   role,
   aiBusy,
   onDraftTip,
+  onCallMentor,
 }: {
   items: TimelineItem[];
   student: Student | null;
@@ -610,6 +630,7 @@ function TimelinePanel({
   role: "mentor" | "student" | null;
   aiBusy: boolean;
   onDraftTip: () => void;
+  onCallMentor: () => void;
 }) {
   const isStudent = role === "student";
   return (
@@ -661,6 +682,21 @@ function TimelinePanel({
               title="用 AI 起草一条导师提示"
             >
               {aiBusy ? "生成中…" : "AI 起草"}
+            </button>
+          )}
+          {isStudent && (
+            <button
+              type="button"
+              onClick={onCallMentor}
+              disabled={!session || aiBusy}
+              className="rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+              style={{
+                borderColor: "var(--status-red)",
+                color: "var(--status-red)",
+              }}
+              title="向导师发出紧急协助请求"
+            >
+              🆘 呼叫导师
             </button>
           )}
           <button
