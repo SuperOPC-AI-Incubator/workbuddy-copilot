@@ -1,5 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
@@ -33,11 +35,17 @@ async function callDeepseek(messages: ChatMsg[], opts?: { json?: boolean; temper
   return data.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
-async function loadRecentTimeline(
-  supabase: Awaited<ReturnType<typeof requireSupabaseAuth.server>>["context"]["supabase"],
-  sessionId: string,
-  limit = 20,
-) {
+type SB = SupabaseClient<Database>;
+
+type HistoryRow = {
+  kind: "prompt" | "reply" | "diagnosis" | "mentor";
+  text: string;
+  tag: string | null;
+  severity: "ok" | "warn" | "error" | null;
+  created_at: string;
+};
+
+async function loadRecentTimeline(supabase: SB, sessionId: string, limit = 20): Promise<HistoryRow[]> {
   const { data, error } = await supabase
     .from("timeline_items")
     .select("kind, text, tag, severity, created_at")
@@ -45,7 +53,7 @@ async function loadRecentTimeline(
     .order("created_at", { ascending: false })
     .limit(limit);
   if (error) throw error;
-  return (data ?? []).reverse();
+  return ((data ?? []) as HistoryRow[]).reverse();
 }
 
 const STUDENT_SYSTEM = `你是 WorkBuddy Copilot，一位专业的 PLC (可编程逻辑控制器) 工业自动化学习助教。
