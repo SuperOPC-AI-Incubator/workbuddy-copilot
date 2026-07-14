@@ -4,6 +4,8 @@ import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { answerStudentPrompt, createMentorDraft } from "./ai.server";
 
+// Keep this file as thin server-function wrappers; implementation lives in ai.server.ts
+// so TanStack Start's production splitter never depends on same-file helper closures.
 export const askAI = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((input: unknown) =>
