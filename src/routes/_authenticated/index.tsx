@@ -575,12 +575,14 @@ function TopBar({
   wsConnected,
   userEmail,
   onSignOut,
+  staleCount,
 }: {
   studentCount: number;
   activeStudent: Student | null;
   wsConnected: boolean;
   userEmail: string;
   onSignOut: () => void;
+  staleCount?: number;
 }) {
   return (
     <header
@@ -605,6 +607,15 @@ function TopBar({
         <span style={{ color: "var(--sidebar-muted)" }}>
           在线学员 <b style={{ color: "var(--sidebar-fg)" }}>{studentCount}</b>
         </span>
+        {staleCount && staleCount > 0 ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5"
+            style={{ background: "oklch(0.75 0.15 70 / 0.25)", color: "oklch(0.95 0.08 80)" }}
+            title="24 小时以上未收到 WorkBuddy 同步"
+          >
+            ⏰ 漏传 <b>{staleCount}</b>
+          </span>
+        ) : null}
         {activeStudent && (
           <span style={{ color: "var(--sidebar-muted)" }}>
             当前 <b style={{ color: "var(--sidebar-fg)" }}>{activeStudent.display_name}</b>
