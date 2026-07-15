@@ -55,7 +55,7 @@ export default defineTool({
     }
 
     const tagValue = tag ? `WB · ${tag}` : "WorkBuddy";
-    const authorId = ctx.getUserId();
+    const authorId = ctx.getUserId()!;
     const rows: Array<{
       session_id: string;
       kind: "prompt" | "reply" | "diagnosis";
