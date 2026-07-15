@@ -51,6 +51,7 @@ function Consent() {
   const { authorization_id } = Route.useSearch();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
   const clientName = details?.client?.name ?? "第三方应用";
 
   async function decide(approve: boolean) {
@@ -66,11 +67,33 @@ function Consent() {
     }
     const target = data?.redirect_url ?? data?.redirect_to;
     if (!target) {
+      // Supabase 未返回跳转地址,但授权本身已经成功。
+      // 直接尝试关闭窗口(popup 场景);无法关闭时显示成功提示。
       setBusy(false);
-      setError("授权服务未返回跳转地址。");
+      setDone(true);
+      setTimeout(() => window.close(), 300);
       return;
     }
     window.location.href = target;
+  }
+
+  if (done) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6 py-12">
+        <div className="rounded-xl border bg-card p-8 text-center shadow-sm">
+          <h1 className="text-lg font-semibold">授权成功 ✅</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {clientName} 已连接到你的账号。你可以关闭这个窗口,返回 WorkBuddy 继续使用。
+          </p>
+          <button
+            onClick={() => window.close()}
+            className="mt-6 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
+          >
+            关闭窗口
+          </button>
+        </div>
+      </main>
+    );
   }
 
   return (
