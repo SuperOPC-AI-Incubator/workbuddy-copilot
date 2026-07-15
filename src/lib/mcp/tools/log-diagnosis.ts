@@ -19,7 +19,14 @@ export default defineTool({
     const sb = supabaseForUser(ctx);
     const { data, error } = await sb
       .from("timeline_items")
-      .insert({ session_id, kind: "diagnosis", text, severity, tag: tag ?? null, author_id: ctx.getUserId() })
+      .insert({
+        session_id,
+        kind: "diagnosis",
+        text,
+        severity,
+        tag: tag ? `WB · ${tag}` : "WorkBuddy",
+        author_id: ctx.getUserId(),
+      })
       .select("id")
       .single();
     if (error) return { content: [{ type: "text", text: error.message }], isError: true };
