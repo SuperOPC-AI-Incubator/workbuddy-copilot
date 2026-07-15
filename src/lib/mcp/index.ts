@@ -5,6 +5,10 @@ import logDiagnosisTool from "./tools/log-diagnosis";
 import callMentorTool from "./tools/call-mentor";
 import getMySessionsTool from "./tools/get-my-sessions";
 import createSessionTool from "./tools/create-session";
+import listStudentsTool from "./tools/list-students";
+import listStudentSessionsTool from "./tools/list-student-sessions";
+import getSessionTimelineTool from "./tools/get-session-timeline";
+import replyAsMentorTool from "./tools/reply-as-mentor";
 
 // The OAuth issuer MUST be the direct Supabase host, not the .lovable.cloud proxy.
 // Only the project ref survives publish unchanged. Read via Vite's inlined literal.
@@ -27,5 +31,9 @@ export default defineMcp({
     logReplyTool,
     logDiagnosisTool,
     callMentorTool,
+    listStudentsTool,
+    listStudentSessionsTool,
+    getSessionTimelineTool,
+    replyAsMentorTool,
   ],
 });
