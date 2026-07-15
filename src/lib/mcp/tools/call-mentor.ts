@@ -22,7 +22,7 @@ export default defineTool({
         kind: "diagnosis",
         severity: "error",
         text: reason,
-        tag: "呼叫导师",
+        tag: "WB · 呼叫导师",
         author_id: ctx.getUserId(),
       })
       .select("id")
