@@ -66,10 +66,18 @@ function MentorDesk() {
     });
   }, []);
 
-  // Mentor-wide "call mentor" alerts: browser notification + sound + in-app banner
-  const [alerts, setAlerts] = useState<
-    { id: string; studentName: string; text: string; sessionId: string; studentId: string }[]
-  >([]);
+  // Mentor-wide alerts: SOS (call mentor) / error (AI severity=error) / warn (soft toast).
+  type AlertKind = "sos" | "error" | "warn";
+  type MentorAlert = {
+    id: string;
+    kind: AlertKind;
+    fromWorkBuddy: boolean;
+    studentName: string;
+    text: string;
+    sessionId: string;
+    studentId: string;
+  };
+  const [alerts, setAlerts] = useState<MentorAlert[]>([]);
   useEffect(() => {
     if (role !== "mentor") return;
     if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
@@ -82,7 +90,13 @@ function MentorDesk() {
         { event: "INSERT", schema: "public", table: "timeline_items" },
         async (payload) => {
           const row = payload.new as TimelineItem;
-          if (row.tag !== "呼叫导师" && !(row.kind === "diagnosis" && row.severity === "error")) return;
+          const tag = row.tag ?? "";
+          const isSos = tag.includes("呼叫导师");
+          const isError = row.kind === "diagnosis" && row.severity === "error" && !isSos;
+          const isWarn = row.kind === "diagnosis" && row.severity === "warn";
+          if (!isSos && !isError && !isWarn) return;
+          const kind: AlertKind = isSos ? "sos" : isError ? "error" : "warn";
+          const fromWorkBuddy = tag.startsWith("WB") || tag === "WorkBuddy";
           // Look up student name via session
           const { data: sess } = await supabase
             .from("sessions")
@@ -94,10 +108,17 @@ function MentorDesk() {
             (sess as { students?: { display_name?: string } } | null)?.students?.display_name ?? "学员";
           const alertId = row.id;
           setAlerts((prev) => [
-            { id: alertId, studentName, text: row.text, sessionId: row.session_id, studentId },
+            { id: alertId, kind, fromWorkBuddy, studentName, text: row.text, sessionId: row.session_id, studentId },
             ...prev,
           ].slice(0, 5));
-          // Sound
+          // Warn: soft toast, auto-dismiss, no sound / notification / title flash.
+          if (kind === "warn") {
+            window.setTimeout(() => {
+              setAlerts((prev) => prev.filter((a) => a.id !== alertId));
+            }, 6000);
+            return;
+          }
+          // Sound (sos = double chime, error = single).
           try {
             const AudioCtx =
               (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
@@ -117,19 +138,27 @@ function MentorDesk() {
                 o.start(ctx.currentTime + start);
                 o.stop(ctx.currentTime + start + dur + 0.02);
               };
-              play(880, 0);
-              play(1175, 0.2);
+              if (kind === "sos") {
+                play(880, 0);
+                play(1175, 0.2);
+              } else {
+                play(720, 0, 0.22);
+              }
             }
           } catch {
             /* noop */
           }
+          const title =
+            kind === "sos"
+              ? `🆘 ${studentName} 呼叫导师`
+              : `⚠️ ${studentName} 需导师介入`;
           // Browser Notification
           if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
             try {
-              const n = new Notification(`🆘 ${studentName} 呼叫导师`, {
+              const n = new Notification(title, {
                 body: row.text,
-                tag: `call-${alertId}`,
-                requireInteraction: true,
+                tag: `mentor-${alertId}`,
+                requireInteraction: kind === "sos",
               });
               n.onclick = () => {
                 window.focus();
@@ -141,7 +170,8 @@ function MentorDesk() {
               /* noop */
             }
           }
-          // Title flash
+          // Title flash (sos only, keeps chrome quieter for AI-flagged errors).
+          if (kind !== "sos") return;
           const original = document.title;
           let toggle = false;
           const iv = window.setInterval(() => {
@@ -393,36 +423,51 @@ function MentorDesk() {
       />
       {role === "mentor" && alerts.length > 0 && (
         <div className="pointer-events-none fixed right-4 top-16 z-50 flex w-80 flex-col gap-2">
-          {alerts.map((a) => (
-            <div
-              key={a.id}
-              className="pointer-events-auto animate-in slide-in-from-right rounded-lg border border-red-500/40 bg-red-600 p-3 text-white shadow-xl"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex-1">
-                  <div className="text-sm font-semibold">🆘 {a.studentName} 呼叫导师</div>
-                  <div className="mt-1 text-xs text-white/90 line-clamp-3">{a.text}</div>
+          {alerts.map((a) => {
+            const style =
+              a.kind === "sos"
+                ? { box: "border-red-500/40 bg-red-600 text-white", chip: "bg-white/20", title: `🆘 ${a.studentName} 呼叫导师` }
+                : a.kind === "error"
+                  ? { box: "border-red-500/40 bg-red-600/95 text-white", chip: "bg-white/20", title: `⚠️ ${a.studentName} 需导师介入` }
+                  : { box: "border-amber-500/40 bg-amber-500 text-white", chip: "bg-white/25", title: `⚠️ ${a.studentName} 需关注` };
+            return (
+              <div
+                key={a.id}
+                className={`pointer-events-auto animate-in slide-in-from-right rounded-lg border p-3 shadow-xl ${style.box}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-1.5 text-sm font-semibold">
+                      <span>{style.title}</span>
+                      {a.fromWorkBuddy && (
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${style.chip}`}>
+                          WorkBuddy
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 text-xs text-white/90 line-clamp-3">{a.text}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => dismissAlert(a.id)}
+                    className="text-white/70 hover:text-white"
+                    aria-label="关闭"
+                  >
+                    ✕
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => dismissAlert(a.id)}
-                  className="text-white/70 hover:text-white"
-                  aria-label="关闭"
-                >
-                  ✕
-                </button>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => jumpToAlert(a)}
+                    className={`rounded-md px-2.5 py-1 text-xs font-medium hover:brightness-110 ${style.chip}`}
+                  >
+                    查看会话
+                  </button>
+                </div>
               </div>
-              <div className="mt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => jumpToAlert(a)}
-                  className="rounded-md bg-white/20 px-2.5 py-1 text-xs font-medium hover:bg-white/30"
-                >
-                  查看会话
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
       <main className="grid min-h-0 flex-1 grid-cols-[280px_320px_1fr]">
@@ -851,6 +896,9 @@ function TimelinePanel({
 function TimelineCard({ item }: { item: TimelineItem }) {
   const meta = KIND_META[item.kind];
   const ts = toEpoch(item.created_at);
+  const tag = item.tag ?? "";
+  const fromWorkBuddy = tag.startsWith("WB") || tag === "WorkBuddy";
+  const displayTag = tag.startsWith("WB · ") ? tag.slice(5) : tag === "WorkBuddy" ? "" : tag;
   return (
     <li className="relative">
       <span
@@ -864,12 +912,21 @@ function TimelineCard({ item }: { item: TimelineItem }) {
         <header className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-foreground">{meta.label}</span>
-            {item.tag && (
+            {fromWorkBuddy && (
+              <span
+                className="rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
+                title="来自 WorkBuddy"
+              >
+                WorkBuddy
+              </span>
+            )}
+            {displayTag && (
               <span
                 className="rounded-full border px-1.5 py-0.5"
                 style={{ borderColor: meta.border, color: "var(--foreground)" }}
               >
-                {item.tag}
+                {displayTag}
               </span>
             )}
             {item.severity && item.kind === "diagnosis" && (
