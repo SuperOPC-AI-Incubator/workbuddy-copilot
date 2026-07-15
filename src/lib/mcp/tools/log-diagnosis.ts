@@ -6,11 +6,11 @@ export default defineTool({
   name: "log_diagnosis",
   title: "记录问题诊断 / Log a diagnosis",
   description:
-    "记录 AI 对学员当前问题的诊断结论,严重度为 info/warning/error。导师端会根据 severity 高亮红点。",
+    "记录 AI 对学员当前问题的诊断结论,严重度为 ok/warn/error。导师端会根据 severity 高亮红点。",
   inputSchema: {
     session_id: z.string().uuid(),
     text: z.string().min(1).max(4000),
-    severity: z.enum(["info", "warning", "error"]).describe("严重度"),
+    severity: z.enum(["ok", "warn", "error"]).describe("严重度: ok=已理解/正常, warn=需要关注, error=需要导师介入"),
     tag: z.string().max(60).optional(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },

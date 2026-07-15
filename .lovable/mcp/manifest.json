@@ -37,13 +37,11 @@
               "description": "会话标题,例如 '电机联锁调试'"
             },
             "group": {
-              "description": "会话分组,默认 today",
+              "description": "会话分组: task=任务对话, space=空间/长期主题; 默认 task",
               "type": "string",
               "enum": [
-                "today",
-                "yesterday",
-                "this_week",
-                "earlier"
+                "task",
+                "space"
               ]
             }
           },
@@ -154,7 +152,7 @@
       {
         "name": "log_diagnosis",
         "title": "记录问题诊断 / Log a diagnosis",
-        "description": "记录 AI 对学员当前问题的诊断结论,严重度为 info/warning/error。导师端会根据 severity 高亮红点。",
+        "description": "记录 AI 对学员当前问题的诊断结论,严重度为 ok/warn/error。导师端会根据 severity 高亮红点。",
         "annotations": {
           "readOnlyHint": false,
           "destructiveHint": false,
@@ -177,11 +175,11 @@
             "severity": {
               "type": "string",
               "enum": [
-                "info",
-                "warning",
+                "ok",
+                "warn",
                 "error"
               ],
-              "description": "严重度"
+              "description": "严重度: ok=已理解/正常, warn=需要关注, error=需要导师介入"
             },
             "tag": {
               "type": "string",
