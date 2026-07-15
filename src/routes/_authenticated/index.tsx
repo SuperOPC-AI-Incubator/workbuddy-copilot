@@ -66,6 +66,106 @@ function MentorDesk() {
     });
   }, []);
 
+  // Mentor-wide "call mentor" alerts: browser notification + sound + in-app banner
+  const [alerts, setAlerts] = useState<
+    { id: string; studentName: string; text: string; sessionId: string; studentId: string }[]
+  >([]);
+  useEffect(() => {
+    if (role !== "mentor") return;
+    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+    const ch = supabase
+      .channel("mentor-alerts")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "timeline_items" },
+        async (payload) => {
+          const row = payload.new as TimelineItem;
+          if (row.tag !== "呼叫导师" && !(row.kind === "diagnosis" && row.severity === "error")) return;
+          // Look up student name via session
+          const { data: sess } = await supabase
+            .from("sessions")
+            .select("student_id, students(display_name)")
+            .eq("id", row.session_id)
+            .single();
+          const studentId = (sess as { student_id?: string } | null)?.student_id ?? "";
+          const studentName =
+            (sess as { students?: { display_name?: string } } | null)?.students?.display_name ?? "学员";
+          const alertId = row.id;
+          setAlerts((prev) => [
+            { id: alertId, studentName, text: row.text, sessionId: row.session_id, studentId },
+            ...prev,
+          ].slice(0, 5));
+          // Sound
+          try {
+            const AudioCtx =
+              (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
+                .AudioContext ??
+              (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+            if (AudioCtx) {
+              const ctx = new AudioCtx();
+              const play = (freq: number, start: number, dur = 0.18) => {
+                const o = ctx.createOscillator();
+                const g = ctx.createGain();
+                o.type = "sine";
+                o.frequency.value = freq;
+                g.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+                g.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + start + 0.02);
+                g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + dur);
+                o.connect(g).connect(ctx.destination);
+                o.start(ctx.currentTime + start);
+                o.stop(ctx.currentTime + start + dur + 0.02);
+              };
+              play(880, 0);
+              play(1175, 0.2);
+            }
+          } catch {
+            /* noop */
+          }
+          // Browser Notification
+          if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+            try {
+              const n = new Notification(`🆘 ${studentName} 呼叫导师`, {
+                body: row.text,
+                tag: `call-${alertId}`,
+                requireInteraction: true,
+              });
+              n.onclick = () => {
+                window.focus();
+                setCurrentStudentId(studentId);
+                setCurrentSessionId(row.session_id);
+                n.close();
+              };
+            } catch {
+              /* noop */
+            }
+          }
+          // Title flash
+          const original = document.title;
+          let toggle = false;
+          const iv = window.setInterval(() => {
+            document.title = (toggle = !toggle) ? `🆘 ${studentName} 呼叫中…` : original;
+          }, 1000);
+          window.setTimeout(() => {
+            window.clearInterval(iv);
+            document.title = original;
+          }, 8000);
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, [role]);
+
+  const dismissAlert = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
+  const jumpToAlert = (a: { id: string; sessionId: string; studentId: string }) => {
+    setCurrentStudentId(a.studentId);
+    setCurrentSessionId(a.sessionId);
+    dismissAlert(a.id);
+  };
+
   // Initial load + realtime for students
   useEffect(() => {
     let mounted = true;
