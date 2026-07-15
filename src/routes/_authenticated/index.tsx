@@ -53,6 +53,22 @@ function MentorDesk() {
   const askAIFn = useServerFn(askAI);
   const draftFn = useServerFn(draftMentorTip);
 
+  // Tick every minute so "24h no sync" stays accurate without a full refetch.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const iv = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(iv);
+  }, []);
+  const STALE_MS = 24 * 60 * 60 * 1000;
+  const staleStudents = useMemo(() => {
+    if (role !== "mentor") return [] as Student[];
+    return students.filter(
+      (s) => now - new Date(s.last_active_at).getTime() > STALE_MS,
+    );
+  }, [role, students, now, STALE_MS]);
+  const isStale = (s: Student) =>
+    role === "mentor" && now - new Date(s.last_active_at).getTime() > STALE_MS;
+
   useEffect(() => {
     supabase.auth.getUser().then(async ({ data }) => {
       setUserEmail(data.user?.email ?? "");
@@ -420,7 +436,34 @@ function MentorDesk() {
         wsConnected={wsConnected}
         userEmail={userEmail}
         onSignOut={signOut}
+        staleCount={staleStudents.length}
       />
+      {role === "mentor" && staleStudents.length > 0 && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-6 py-2 text-xs text-amber-900 dark:text-amber-200">
+          <span className="font-semibold">⏰ {staleStudents.length} 名学员 24h+ 未同步：</span>
+          <div className="flex flex-wrap gap-1.5">
+            {staleStudents.slice(0, 8).map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => selectStudent(s.id)}
+                className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 hover:bg-amber-500/25"
+                title={`最后同步 ${timeAgo(toEpoch(s.last_active_at))}`}
+              >
+                {s.display_name} · {timeAgo(toEpoch(s.last_active_at))}
+              </button>
+            ))}
+            {staleStudents.length > 8 && (
+              <span className="px-1 text-amber-700 dark:text-amber-300/80">
+                +{staleStudents.length - 8}
+              </span>
+            )}
+          </div>
+          <span className="ml-auto text-[11px] text-amber-700/80 dark:text-amber-300/70">
+            提示：请检查 WorkBuddy 是否仍在调用 log_turn
+          </span>
+        </div>
+      )}
       {role === "mentor" && alerts.length > 0 && (
         <div className="pointer-events-none fixed right-4 top-16 z-50 flex w-80 flex-col gap-2">
           {alerts.map((a) => {
@@ -475,6 +518,7 @@ function MentorDesk() {
           students={students}
           currentId={currentStudentId}
           onSelect={selectStudent}
+          isStale={isStale}
         />
         <SessionPanel
           sessions={sessions}
@@ -531,12 +575,14 @@ function TopBar({
   wsConnected,
   userEmail,
   onSignOut,
+  staleCount,
 }: {
   studentCount: number;
   activeStudent: Student | null;
   wsConnected: boolean;
   userEmail: string;
   onSignOut: () => void;
+  staleCount?: number;
 }) {
   return (
     <header
@@ -561,6 +607,15 @@ function TopBar({
         <span style={{ color: "var(--sidebar-muted)" }}>
           在线学员 <b style={{ color: "var(--sidebar-fg)" }}>{studentCount}</b>
         </span>
+        {staleCount && staleCount > 0 ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-full px-2 py-0.5"
+            style={{ background: "oklch(0.75 0.15 70 / 0.25)", color: "oklch(0.95 0.08 80)" }}
+            title="24 小时以上未收到 WorkBuddy 同步"
+          >
+            ⏰ 漏传 <b>{staleCount}</b>
+          </span>
+        ) : null}
         {activeStudent && (
           <span style={{ color: "var(--sidebar-muted)" }}>
             当前 <b style={{ color: "var(--sidebar-fg)" }}>{activeStudent.display_name}</b>
@@ -604,10 +659,12 @@ function StudentPanel({
   students,
   currentId,
   onSelect,
+  isStale,
 }: {
   students: Student[];
   currentId: string | null;
   onSelect: (id: string) => void;
+  isStale?: (s: Student) => boolean;
 }) {
   return (
     <aside
@@ -623,6 +680,7 @@ function StudentPanel({
         )}
         {students.map((s) => {
           const active = s.id === currentId;
+          const stale = isStale?.(s) ?? false;
           return (
             <li key={s.id}>
               <button
@@ -634,10 +692,19 @@ function StudentPanel({
                 <StatusDot severity={s.last_severity} />
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span
-                    className="truncate text-sm font-medium"
+                    className="flex items-center gap-1.5 truncate text-sm font-medium"
                     style={{ color: "var(--sidebar-fg)" }}
                   >
-                    {s.display_name}
+                    <span className="truncate">{s.display_name}</span>
+                    {stale && (
+                      <span
+                        className="shrink-0 rounded px-1 py-0.5 text-[9px] font-medium"
+                        style={{ background: "oklch(0.75 0.15 70 / 0.3)", color: "oklch(0.95 0.08 80)" }}
+                        title="24 小时未同步"
+                      >
+                        ⏰
+                      </span>
+                    )}
                   </span>
                   <span
                     className="truncate text-[11px]"
