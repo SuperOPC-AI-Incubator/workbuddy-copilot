@@ -659,10 +659,12 @@ function StudentPanel({
   students,
   currentId,
   onSelect,
+  isStale,
 }: {
   students: Student[];
   currentId: string | null;
   onSelect: (id: string) => void;
+  isStale?: (s: Student) => boolean;
 }) {
   return (
     <aside
@@ -678,6 +680,7 @@ function StudentPanel({
         )}
         {students.map((s) => {
           const active = s.id === currentId;
+          const stale = isStale?.(s) ?? false;
           return (
             <li key={s.id}>
               <button
@@ -689,10 +692,19 @@ function StudentPanel({
                 <StatusDot severity={s.last_severity} />
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span
-                    className="truncate text-sm font-medium"
+                    className="flex items-center gap-1.5 truncate text-sm font-medium"
                     style={{ color: "var(--sidebar-fg)" }}
                   >
-                    {s.display_name}
+                    <span className="truncate">{s.display_name}</span>
+                    {stale && (
+                      <span
+                        className="shrink-0 rounded px-1 py-0.5 text-[9px] font-medium"
+                        style={{ background: "oklch(0.75 0.15 70 / 0.3)", color: "oklch(0.95 0.08 80)" }}
+                        title="24 小时未同步"
+                      >
+                        ⏰
+                      </span>
+                    )}
                   </span>
                   <span
                     className="truncate text-[11px]"
