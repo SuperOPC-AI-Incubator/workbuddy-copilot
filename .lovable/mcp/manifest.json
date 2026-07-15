@@ -1,0 +1,233 @@
+{
+  "version": 1,
+  "sdk_version": "0.22.0",
+  "path": "/mcp",
+  "auth": {
+    "type": "oauth",
+    "issuer": "https://bnuofecykdoukjjnqbgx.supabase.co/auth/v1",
+    "accepted_audiences": [
+      "authenticated"
+    ]
+  },
+  "mcp": {
+    "server": {
+      "name": "workbuddy-copilot-mcp",
+      "version": "0.1.0",
+      "title": "WorkBuddy Copilot"
+    },
+    "tools": [
+      {
+        "name": "create_session",
+        "title": "创建新会话 / Create a new session",
+        "description": "为当前学员创建一个新的会话(session)。用于开始一段新的学习/编程任务。返回 session_id 供后续 log_* 工具使用。",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "会话标题,例如 '电机联锁调试'"
+            },
+            "group": {
+              "description": "会话分组,默认 today",
+              "type": "string",
+              "enum": [
+                "today",
+                "yesterday",
+                "this_week",
+                "earlier"
+              ]
+            }
+          },
+          "required": [
+            "title"
+          ]
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "get_my_sessions",
+        "title": "获取我的会话列表 / List my sessions",
+        "description": "列出当前学员最近的会话,便于选择要写入的 session_id。",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "limit": {
+              "description": "最多返回条数,默认 10",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          }
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "log_prompt",
+        "title": "记录学员提问 / Log a student prompt",
+        "description": "将学员在 WorkBuddy 中向 AI 发出的提问同步到导师观察台的 timeline。使用前先通过 get_my_sessions 或 create_session 取得 session_id。",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "description": "目标会话 id"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000,
+              "description": "学员的提问原文"
+            },
+            "tag": {
+              "description": "可选标签,例如 'PLC/联锁'",
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          "required": [
+            "session_id",
+            "text"
+          ]
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "log_reply",
+        "title": "记录 AI 回复 / Log an AI reply",
+        "description": "将 WorkBuddy 中 AI 给学员的回复同步到 timeline。",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8000,
+              "description": "AI 回复的原文"
+            },
+            "tag": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          "required": [
+            "session_id",
+            "text"
+          ]
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "log_diagnosis",
+        "title": "记录问题诊断 / Log a diagnosis",
+        "description": "记录 AI 对学员当前问题的诊断结论,严重度为 info/warning/error。导师端会根据 severity 高亮红点。",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            },
+            "severity": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "error"
+              ],
+              "description": "严重度"
+            },
+            "tag": {
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          "required": [
+            "session_id",
+            "text",
+            "severity"
+          ]
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "call_mentor",
+        "title": "呼叫导师 / Call mentor for help",
+        "description": "当学员在 WorkBuddy 中遇到无法自行解决的问题时,调用此工具触发导师观察台的红色告警。导师会看到该学员/会话上出现 SOS 事件并及时介入。",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000,
+              "description": "呼叫原因简述,例如 '联锁逻辑始终不触发,请求排查'"
+            }
+          },
+          "required": [
+            "session_id",
+            "reason"
+          ]
+        },
+        "outputSchema": null
+      }
+    ]
+  }
+}
