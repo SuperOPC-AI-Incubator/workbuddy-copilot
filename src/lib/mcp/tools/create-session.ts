@@ -10,9 +10,9 @@ export default defineTool({
   inputSchema: {
     title: z.string().min(1).max(200).describe("会话标题,例如 '电机联锁调试'"),
     group: z
-      .enum(["today", "yesterday", "this_week", "earlier"])
+      .enum(["task", "space"])
       .optional()
-      .describe("会话分组,默认 today"),
+      .describe("会话分组: task=任务对话, space=空间/长期主题; 默认 task"),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   handler: async ({ title, group }, ctx) => {
@@ -21,7 +21,7 @@ export default defineTool({
     if (!student) return { content: [{ type: "text", text: "未找到学员档案(仅学员角色可用)" }], isError: true };
     const { data, error } = await supabase
       .from("sessions")
-      .insert({ student_id: student.id, session_title: title, session_group: group ?? "today" })
+      .insert({ student_id: student.id, session_title: title, session_group: group ?? "task" })
       .select("id, session_title")
       .single();
     if (error) return { content: [{ type: "text", text: error.message }], isError: true };
