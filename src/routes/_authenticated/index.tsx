@@ -896,6 +896,9 @@ function TimelinePanel({
 function TimelineCard({ item }: { item: TimelineItem }) {
   const meta = KIND_META[item.kind];
   const ts = toEpoch(item.created_at);
+  const tag = item.tag ?? "";
+  const fromWorkBuddy = tag.startsWith("WB") || tag === "WorkBuddy";
+  const displayTag = tag.startsWith("WB · ") ? tag.slice(5) : tag === "WorkBuddy" ? "" : tag;
   return (
     <li className="relative">
       <span
@@ -909,12 +912,21 @@ function TimelineCard({ item }: { item: TimelineItem }) {
         <header className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-foreground">{meta.label}</span>
-            {item.tag && (
+            {fromWorkBuddy && (
+              <span
+                className="rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
+                title="来自 WorkBuddy"
+              >
+                WorkBuddy
+              </span>
+            )}
+            {displayTag && (
               <span
                 className="rounded-full border px-1.5 py-0.5"
                 style={{ borderColor: meta.border, color: "var(--foreground)" }}
               >
-                {item.tag}
+                {displayTag}
               </span>
             )}
             {item.severity && item.kind === "diagnosis" && (
