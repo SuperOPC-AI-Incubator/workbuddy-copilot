@@ -391,6 +391,40 @@ function MentorDesk() {
         userEmail={userEmail}
         onSignOut={signOut}
       />
+      {role === "mentor" && alerts.length > 0 && (
+        <div className="pointer-events-none fixed right-4 top-16 z-50 flex w-80 flex-col gap-2">
+          {alerts.map((a) => (
+            <div
+              key={a.id}
+              className="pointer-events-auto animate-in slide-in-from-right rounded-lg border border-red-500/40 bg-red-600 p-3 text-white shadow-xl"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex-1">
+                  <div className="text-sm font-semibold">🆘 {a.studentName} 呼叫导师</div>
+                  <div className="mt-1 text-xs text-white/90 line-clamp-3">{a.text}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => dismissAlert(a.id)}
+                  className="text-white/70 hover:text-white"
+                  aria-label="关闭"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="mt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => jumpToAlert(a)}
+                  className="rounded-md bg-white/20 px-2.5 py-1 text-xs font-medium hover:bg-white/30"
+                >
+                  查看会话
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <main className="grid min-h-0 flex-1 grid-cols-[280px_320px_1fr]">
         <StudentPanel
           students={students}
