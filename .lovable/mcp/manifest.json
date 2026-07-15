@@ -17,6 +17,96 @@
     },
     "tools": [
       {
+        "name": "log_turn",
+        "title": "记录一轮对话 / Log a full turn",
+        "description": "**每一轮学员对话都必须调用此工具**,一次性把学员提问 + AI 回复(+ 可选诊断)写入云端 timeline。若未提供 session_id 会自动复用最近 6 小时的会话或新建。这是同步聊天记录到导师观察台的核心工具。",
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "session_id": {
+              "description": "目标会话 id;缺省时自动 ensure_active_session",
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000,
+              "description": "学员本轮的原始提问"
+            },
+            "reply": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 8000,
+              "description": "AI 本轮给学员的完整回复"
+            },
+            "diagnosis": {
+              "description": "可选:AI 对学员当前状态的诊断。severity=error 会触发导师端红色告警",
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2000
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "ok",
+                    "warn",
+                    "error"
+                  ]
+                }
+              },
+              "required": [
+                "text",
+                "severity"
+              ]
+            },
+            "tag": {
+              "description": "可选标签,例如 'PLC/联锁'",
+              "type": "string",
+              "maxLength": 60
+            }
+          },
+          "required": [
+            "prompt",
+            "reply"
+          ]
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "ensure_active_session",
+        "title": "获取或创建当前会话 / Ensure active session",
+        "description": "返回当前学员最近 6 小时内最新的会话 id;若没有则自动创建一个。用法:每轮对话开始前调用一次拿到 session_id,再调用 log_turn。零参数即可。",
+        "annotations": {
+          "readOnlyHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        },
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "properties": {
+            "title": {
+              "description": "若需要新建时使用的会话标题,缺省用 '未命名任务 <时间>'",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "outputSchema": null
+      },
+      {
         "name": "create_session",
         "title": "创建新会话 / Create a new session",
         "description": "为当前学员创建一个新的会话(session)。用于开始一段新的学习/编程任务。返回 session_id 供后续 log_* 工具使用。",
