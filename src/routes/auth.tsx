@@ -4,11 +4,16 @@ import { supabase } from "@/integrations/supabase/client";
 
 export const Route = createFileRoute("/auth")({
   ssr: false,
+  validateSearch: (s: Record<string, unknown>) => ({
+    next: typeof s.next === "string" ? s.next : undefined,
+  }),
   component: AuthPage,
 });
 
 function AuthPage() {
   const navigate = useNavigate();
+  const { next } = Route.useSearch();
+  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -20,9 +25,9 @@ function AuthPage() {
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
-      if (data.user) navigate({ to: "/", replace: true });
+      if (data.user) window.location.replace(safeNext);
     });
-  }, [navigate]);
+  }, [navigate, safeNext]);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -35,7 +40,7 @@ function AuthPage() {
           email,
           password,
           options: {
-            emailRedirectTo: window.location.origin,
+            emailRedirectTo: window.location.origin + safeNext,
             data: {
               display_name: displayName || email.split("@")[0],
               role,
@@ -43,12 +48,12 @@ function AuthPage() {
           },
         });
         if (error) throw error;
-        if (data.session) navigate({ to: "/", replace: true });
+        if (data.session) window.location.replace(safeNext);
         else setInfo("注册成功，请查收邮箱验证链接后再登录。");
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
-        navigate({ to: "/", replace: true });
+        window.location.replace(safeNext);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "认证失败");
