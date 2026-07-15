@@ -55,15 +55,17 @@ export default defineTool({
     }
 
     const tagValue = tag ? `WB · ${tag}` : "WorkBuddy";
+    const authorId = ctx.getUserId();
     const rows: Array<{
       session_id: string;
       kind: "prompt" | "reply" | "diagnosis";
       text: string;
       tag: string;
+      author_id: string;
       severity?: "ok" | "warn" | "error";
     }> = [
-      { session_id: sid!, kind: "prompt", text: prompt, tag: tagValue },
-      { session_id: sid!, kind: "reply", text: reply, tag: tagValue },
+      { session_id: sid!, kind: "prompt", text: prompt, tag: tagValue, author_id: authorId },
+      { session_id: sid!, kind: "reply", text: reply, tag: tagValue, author_id: authorId },
     ];
     if (diagnosis) {
       rows.push({
@@ -71,6 +73,7 @@ export default defineTool({
         kind: "diagnosis",
         text: diagnosis.text,
         tag: tagValue,
+        author_id: authorId,
         severity: diagnosis.severity,
       });
     }
