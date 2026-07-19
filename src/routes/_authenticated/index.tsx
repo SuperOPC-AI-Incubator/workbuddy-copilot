@@ -577,6 +577,7 @@ function TopBar({
   userEmail,
   onSignOut,
   staleCount,
+  role,
 }: {
   studentCount: number;
   activeStudent: Student | null;
@@ -584,6 +585,7 @@ function TopBar({
   userEmail: string;
   onSignOut: () => void;
   staleCount?: number;
+  role?: "mentor" | "student" | null;
 }) {
   return (
     <header
@@ -638,6 +640,15 @@ function TopBar({
           <span style={{ color: "var(--sidebar-muted)" }} className="hidden md:inline">
             {userEmail}
           </span>
+        )}
+        {role === "student" && (
+          <Link
+            to="/workbuddy"
+            className="rounded-md border px-2.5 py-1 text-xs transition-colors"
+            style={{ borderColor: "oklch(1 0 0 / 0.15)", color: "var(--sidebar-fg)" }}
+          >
+            WorkBuddy 接入
+          </Link>
         )}
         <button
           type="button"
