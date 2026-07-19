@@ -61,6 +61,7 @@ export type Database = {
           last_severity: Database["public"]["Enums"]["severity"]
           updated_at: string
           user_id: string | null
+          workbuddy_token: string
         }
         Insert: {
           created_at?: string
@@ -70,6 +71,7 @@ export type Database = {
           last_severity?: Database["public"]["Enums"]["severity"]
           updated_at?: string
           user_id?: string | null
+          workbuddy_token?: string
         }
         Update: {
           created_at?: string
@@ -79,6 +81,7 @@ export type Database = {
           last_severity?: Database["public"]["Enums"]["severity"]
           updated_at?: string
           user_id?: string | null
+          workbuddy_token?: string
         }
         Relationships: []
       }
