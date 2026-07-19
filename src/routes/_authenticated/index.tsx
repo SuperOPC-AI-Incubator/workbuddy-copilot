@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-meta";
@@ -437,6 +437,7 @@ function MentorDesk() {
         userEmail={userEmail}
         onSignOut={signOut}
         staleCount={staleStudents.length}
+        role={role}
       />
       {role === "mentor" && staleStudents.length > 0 && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-6 py-2 text-xs text-amber-900 dark:text-amber-200">
@@ -576,6 +577,7 @@ function TopBar({
   userEmail,
   onSignOut,
   staleCount,
+  role,
 }: {
   studentCount: number;
   activeStudent: Student | null;
@@ -583,6 +585,7 @@ function TopBar({
   userEmail: string;
   onSignOut: () => void;
   staleCount?: number;
+  role?: "mentor" | "student" | null;
 }) {
   return (
     <header
@@ -637,6 +640,15 @@ function TopBar({
           <span style={{ color: "var(--sidebar-muted)" }} className="hidden md:inline">
             {userEmail}
           </span>
+        )}
+        {role === "student" && (
+          <Link
+            to="/workbuddy"
+            className="rounded-md border px-2.5 py-1 text-xs transition-colors"
+            style={{ borderColor: "oklch(1 0 0 / 0.15)", color: "var(--sidebar-fg)" }}
+          >
+            WorkBuddy 接入
+          </Link>
         )}
         <button
           type="button"
