@@ -5,7 +5,7 @@ import { z } from "zod";
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Workbuddy-Signature",
+  "Access-Control-Allow-Headers": "Content-Type, X-Workbuddy-Signature, Authorization",
   "Access-Control-Max-Age": "86400",
 } as const;
 
@@ -28,12 +28,12 @@ const PayloadSchema = z.object({
     user_id: z.string().uuid().optional(),
     email: z.string().email().optional(),
     display_name: z.string().min(1).max(80).optional(),
-  }),
+  }).optional(),
   session: z.object({
     id: z.string().uuid().optional(),
     title: z.string().min(1).max(120).optional(),
     group: z.enum(["space", "task"]).optional(),
-  }),
+  }).optional(),
   items: z.array(ItemSchema).min(1).max(50),
 });
 
@@ -58,7 +58,18 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
         const raw = await request.text();
         if (raw.length > 200_000) return json({ error: "Payload too large" }, 413);
 
-        if (!verifySignature(raw, request.headers.get("x-workbuddy-signature"), secret)) {
+        // Two auth modes:
+        // 1) Per-student bearer token (SKILL.md flow, simple for the AI)
+        // 2) HMAC signature over raw body (server-to-server flow)
+        const authHeader = request.headers.get("authorization") ?? "";
+        const bearer = authHeader.toLowerCase().startsWith("bearer ")
+          ? authHeader.slice(7).trim()
+          : "";
+        const hasSig = !!request.headers.get("x-workbuddy-signature");
+        if (!bearer && !hasSig) {
+          return json({ error: "Missing Authorization bearer or X-Workbuddy-Signature" }, 401);
+        }
+        if (!bearer && !verifySignature(raw, request.headers.get("x-workbuddy-signature"), secret)) {
           return json({ error: "Invalid signature" }, 401);
         }
 
@@ -73,8 +84,16 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
 
         // Resolve student
         let studentId: string | null = null;
-        const s = parsed.student;
-        if (s.user_id) {
+        let authorId: string | null = null;
+        if (bearer) {
+          const { data } = await supabaseAdmin
+            .from("students").select("id, user_id").eq("workbuddy_token", bearer).maybeSingle();
+          if (!data) return json({ error: "Invalid student token" }, 401);
+          studentId = data.id;
+          authorId = data.user_id;
+        }
+        const s = parsed.student ?? {};
+        if (!studentId && s.user_id) {
           const { data } = await supabaseAdmin
             .from("students").select("id").eq("user_id", s.user_id).maybeSingle();
           studentId = data?.id ?? null;
@@ -99,10 +118,11 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
         }
 
         // Resolve or create session
-        let sessionId = parsed.session.id ?? null;
+        const sess = parsed.session ?? {};
+        let sessionId = sess.id ?? null;
         if (!sessionId) {
-          const title = parsed.session.title ?? "WorkBuddy 会话";
-          const group = parsed.session.group ?? "task";
+          const title = sess.title ?? "WorkBuddy 会话";
+          const group = sess.group ?? "task";
           const { data: existing } = await supabaseAdmin
             .from("sessions")
             .select("id")
@@ -126,8 +146,9 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
           session_id: sessionId!,
           kind: it.kind,
           text: it.text,
-          tag: it.tag ?? null,
+          tag: it.tag ?? "WorkBuddy",
           severity: it.severity ?? null,
+          author_id: authorId,
         }));
 
         const { error: insErr } = await supabaseAdmin.from("timeline_items").insert(rows);
