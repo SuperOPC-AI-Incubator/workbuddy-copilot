@@ -940,6 +940,57 @@ AFTER INSERT ON public.timeline_items
 FOR EACH ROW
 EXECUTE FUNCTION public.create_mentor_delivery();
 
+CREATE OR REPLACE FUNCTION public.resolve_workbuddy_credential(
+  _token_hash text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $function$
+DECLARE
+  resolved_student_id uuid;
+  resolved_status text;
+BEGIN
+  IF _token_hash IS NULL
+    OR _token_hash !~ '^[0-9a-f]{64}$'
+  THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'invalid');
+  END IF;
+
+  -- Resolving an active credential and recording its use are one statement.
+  -- No plaintext token or display prefix is read or returned.
+  UPDATE public.workbuddy_credentials AS credential
+  SET last_used_at = pg_catalog.now()
+  WHERE credential.token_hash = _token_hash
+    AND credential.status = 'active'
+  RETURNING credential.student_id INTO resolved_student_id;
+
+  IF resolved_student_id IS NOT NULL THEN
+    RETURN pg_catalog.jsonb_build_object(
+      'status', 'active',
+      'student_id', resolved_student_id
+    );
+  END IF;
+
+  SELECT credential.status
+  INTO resolved_status
+  FROM public.workbuddy_credentials AS credential
+  WHERE credential.token_hash = _token_hash;
+
+  IF resolved_status = 'revoked' THEN
+    RETURN pg_catalog.jsonb_build_object('status', 'revoked');
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object('status', 'invalid');
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.resolve_workbuddy_credential(text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.resolve_workbuddy_credential(text)
+  TO service_role;
+
 CREATE OR REPLACE FUNCTION public.ingest_workbuddy_turn(
   _event_id uuid,
   _student_id uuid,

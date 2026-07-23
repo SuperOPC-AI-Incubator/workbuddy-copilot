@@ -494,6 +494,12 @@ export type Database = {
         };
         Returns: Json;
       };
+      resolve_workbuddy_credential: {
+        Args: {
+          _token_hash: string;
+        };
+        Returns: Json;
+      };
     };
     Enums: {
       app_role: "mentor" | "student" | "team_admin";

@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(75);
+SELECT plan(82);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -709,7 +709,87 @@ WHERE user_id = '10000000-0000-0000-0000-000000000103'::uuid
 
 RESET ROLE;
 
+SET LOCAL ROLE authenticated;
+
+SELECT throws_ok(
+  $test$
+    SELECT public.resolve_workbuddy_credential(repeat('1', 64))
+  $test$,
+  '42501',
+  'permission denied for function resolve_workbuddy_credential',
+  'browser-authenticated callers cannot resolve WorkBuddy credentials'
+);
+
+RESET ROLE;
+
 SET LOCAL ROLE service_role;
+
+INSERT INTO public.workbuddy_credentials (
+  student_id,
+  token_hash,
+  token_prefix,
+  source
+)
+SELECT
+  student.id,
+  repeat('1', 64),
+  '11111111',
+  'issued'
+FROM public.students AS student
+WHERE student.user_id = '10000000-0000-0000-0000-000000000001'::uuid;
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'active_credential',
+  public.resolve_workbuddy_credential(repeat('1', 64))
+);
+
+SELECT ok(
+  (
+    SELECT
+      resolved.result ->> 'status' = 'active'
+      AND resolved.result ->> 'student_id' = credential.student_id::text
+      AND jsonb_object_length(resolved.result) = 2
+      AND NOT resolved.result ? 'token_hash'
+      AND NOT resolved.result ? 'token_prefix'
+      AND credential.last_used_at IS NOT NULL
+    FROM cloud_test_results AS resolved
+    JOIN public.workbuddy_credentials AS credential
+      ON credential.token_hash = repeat('1', 64)
+    WHERE resolved.label = 'active_credential'
+  ),
+  'active credential resolution atomically records use and returns only status and student identity'
+);
+
+INSERT INTO public.workbuddy_credentials (
+  student_id,
+  token_hash,
+  token_prefix,
+  source,
+  status,
+  revoked_at
+)
+SELECT
+  student.id,
+  repeat('2', 64),
+  '22222222',
+  'issued',
+  'revoked',
+  now()
+FROM public.students AS student
+WHERE student.user_id = '10000000-0000-0000-0000-000000000001'::uuid;
+
+SELECT is(
+  public.resolve_workbuddy_credential(repeat('2', 64)) ->> 'status',
+  'revoked',
+  'revoked credential is distinguishable without exposing credential material'
+);
+
+SELECT is(
+  public.resolve_workbuddy_credential(repeat('3', 64)) ->> 'status',
+  'invalid',
+  'unknown credential hash is reported as invalid'
+);
 
 INSERT INTO cloud_test_results (label, result)
 SELECT
@@ -941,6 +1021,28 @@ SELECT
     _reply => 'Student two reply'
   );
 
+SELECT throws_ok(
+  $test$
+    SELECT public.ingest_workbuddy_turn(
+      _event_id => '20000000-0000-0000-0000-000000000001'::uuid,
+      _student_id => (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000002'::uuid
+      ),
+      _source => 'mcp',
+      _source_session_key => 'cross-student-replay',
+      _session_title => 'Must not leak another student result',
+      _payload_sha256 => repeat('a', 64),
+      _prompt => 'Deterministic prompt one',
+      _reply => 'Deterministic reply one'
+    )
+  $test$,
+  'P4090',
+  'workbuddy_event_conflict',
+  'the same event id cannot be replayed across students even with the same payload hash'
+);
+
 INSERT INTO cloud_test_results (label, result)
 SELECT
   'student_two_message',
@@ -960,6 +1062,71 @@ SELECT
   );
 
 RESET ROLE;
+
+CREATE OR REPLACE FUNCTION public.cloud_test_force_timeline_failure()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $function$
+BEGIN
+  IF NEW.text = 'force atomic ingest failure' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'P0001',
+      MESSAGE = 'forced_timeline_failure';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+CREATE TRIGGER cloud_test_force_timeline_failure
+BEFORE INSERT ON public.timeline_items
+FOR EACH ROW
+EXECUTE FUNCTION public.cloud_test_force_timeline_failure();
+
+SET LOCAL ROLE service_role;
+
+SELECT throws_ok(
+  $test$
+    SELECT public.ingest_workbuddy_turn(
+      _event_id => '20000000-0000-0000-0000-000000000099'::uuid,
+      _student_id => (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      _source => 'connector',
+      _source_session_key => 'forced-partial-failure',
+      _session_title => 'Forced transaction rollback',
+      _payload_sha256 => repeat('9', 64),
+      _prompt => 'force atomic ingest failure',
+      _reply => 'this row must never be inserted'
+    )
+  $test$,
+  'P0001',
+  'forced_timeline_failure',
+  'a timeline failure escapes the atomic ingest RPC'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1
+    FROM public.workbuddy_ingest_events
+    WHERE event_id = '20000000-0000-0000-0000-000000000099'::uuid
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.sessions
+    WHERE source = 'connector'
+      AND source_session_key = 'forced-partial-failure'
+  ),
+  'a failed timeline insert leaves neither an ingest ledger row nor a resolved session'
+);
+
+RESET ROLE;
+
+DROP TRIGGER cloud_test_force_timeline_failure
+  ON public.timeline_items;
+DROP FUNCTION public.cloud_test_force_timeline_failure();
 
 SELECT ok(
   EXISTS (

@@ -404,6 +404,12 @@ describe("cloud integration schema contract", () => {
       };
       Returns: Json;
     }>();
+    expectTypeOf<Database["public"]["Functions"]["resolve_workbuddy_credential"]>().toEqualTypeOf<{
+      Args: {
+        _token_hash: string;
+      };
+      Returns: Json;
+    }>();
     expectTypeOf<Database["public"]["Functions"]["ingest_workbuddy_turn"]>().toEqualTypeOf<{
       Args: {
         _client_created_at?: string | null;
@@ -615,6 +621,7 @@ describe("cloud integration schema contract", () => {
       "bootstrap_staff_account",
       "provision_staff_account",
       "complete_staff_password_change",
+      "resolve_workbuddy_credential",
       "ingest_workbuddy_turn",
       "create_mentor_message",
     ];
@@ -1127,7 +1134,7 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*75\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*82\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);

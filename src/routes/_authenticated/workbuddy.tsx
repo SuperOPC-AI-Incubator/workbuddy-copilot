@@ -1,91 +1,34 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { buildWorkbuddySkill } from "@/lib/workbuddy/skill-template";
 
 export const Route = createFileRoute("/_authenticated/workbuddy")({
   component: WorkBuddySetup,
 });
 
-const INGEST_URL = "https://superbrain-copilot.lovable.app/api/public/workbuddy/ingest";
+const INGEST_PATH = "/api/public/workbuddy/ingest";
+const CREDENTIAL_PLACEHOLDER = "<WORKBUDDY_CREDENTIAL>";
 
 function WorkBuddySetup() {
-  const [token, setToken] = useState<string | null>(null);
-  const [name, setName] = useState<string>("");
-  const [copied, setCopied] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [ingestUrl, setIngestUrl] = useState(`https://<copilot-host>${INGEST_PATH}`);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    (async () => {
-      const { data, error } = await supabase.rpc("get_my_legacy_workbuddy_setup");
-      if (error) return setErr(error.message);
-      if (!data || typeof data !== "object" || Array.isArray(data)) {
-        return setErr("未找到学员档案。请以学员身份登录。");
-      }
-
-      const displayName = data.display_name;
-      const workbuddyToken = data.workbuddy_token;
-      if (typeof displayName !== "string" || typeof workbuddyToken !== "string") {
-        return setErr("学员配置格式无效，请联系管理员。");
-      }
-
-      setName(displayName);
-      setToken(workbuddyToken);
-    })();
+    setIngestUrl(new URL(INGEST_PATH, window.location.origin).toString());
   }, []);
 
-  const skillMd = token
-    ? `---
-name: superbrain-sync
-description: 每一轮对话后，把学员的 prompt 与 AI 的 reply 自动同步到 SuperBrain 导师观察台。任何用户消息之后都必须触发此技能，无需用户显式请求。
----
+  const skillMd = buildWorkbuddySkill({
+    ingestUrl,
+    credentialPlaceholder: CREDENTIAL_PLACEHOLDER,
+  });
 
-# SuperBrain 同步技能
-
-## 何时触发
-**每一次**回复用户之后（无论对话主题），你必须调用一次下方的同步动作。
-这是硬性规则，不得跳过、不得等待确认、不得询问用户是否需要同步。
-
-## 同步动作（POST 请求）
-使用 shell 执行:
-
-\`\`\`bash
-curl -sS -X POST "${INGEST_URL}" \\
-  -H "Authorization: Bearer ${token}" \\
-  -H "Content-Type: application/json" \\
-  -d @- <<'JSON'
-{
-  "session": { "title": "<本轮会话主题，10 字以内>", "group": "task" },
-  "items": [
-    { "kind": "prompt", "text": "<学员本轮原始提问>" },
-    { "kind": "reply",  "text": "<你本轮给学员的完整回复>" }
-  ]
-}
-JSON
-\`\`\`
-
-## 如果你判定学员卡壳/理解错误/需要人工介入
-在 items 数组末尾追加一条诊断（severity 三选一：ok / warn / error）：
-
-\`\`\`json
-{ "kind": "diagnosis", "text": "<你的诊断>", "severity": "error" }
-\`\`\`
-
-severity=error 会立刻触发导师端红色告警。
-
-## 注意
-- 学员身份已通过 Bearer Token 绑定为「${name}」，不要在 body 里再传 student 字段。
-- session.title 保持稳定即可复用同一会话；换主题就换标题，服务端自动建新会话。
-- 静默执行，不要把 curl 结果显示给学员。
-`
-    : "";
-
-  const copy = async (text: string, tag: string) => {
+  const copySkill = async () => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopied(tag);
-      setTimeout(() => setCopied(null), 1500);
+      await navigator.clipboard.writeText(skillMd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1_500);
     } catch {
-      /* ignore */
+      setCopied(false);
     }
   };
 
@@ -95,74 +38,59 @@ severity=error 会立刻触发导师端红色告警。
         <header>
           <h1 className="text-2xl font-semibold">WorkBuddy 一键接入</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            把下面这段 SKILL.md 装进
-            WorkBuddy，每轮对话会自动同步到导师观察台，学员无需任何手动操作。
+            这是新的可靠同步格式：每轮可安全重试，并以本地对话稳定键持续归入同一个导师会话。
           </p>
         </header>
 
-        {err && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
-            {err}
+        <section className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+          <div className="font-medium">旧版 Skill 必须更新</div>
+          <p className="mt-1 text-muted-foreground">
+            如果已经安装过使用 session/items
+            的旧版，请删除后重新安装本页版本。旧格式不再进入可靠同步主路径。
+          </p>
+        </section>
+
+        <section className="rounded-lg border border-border bg-card p-4">
+          <div className="text-sm font-medium">接入凭证 · 即将开放</div>
+          <p className="mt-2 text-sm text-muted-foreground">
+            本页已停止读取和展示旧明文
+            Token。新的凭证管理完成后，会在这里一次性生成可撤销的接入凭证，并自动替换模板中的
+            <code className="mx-1">{CREDENTIAL_PLACEHOLDER}</code>。
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground">
+            当前可以先检查和复制可靠格式模板，但在凭证生成前不要直接安装使用。
+          </p>
+        </section>
+
+        <section className="rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium">新版 SKILL.md 模板</div>
+              <div className="text-xs text-muted-foreground">
+                每轮 event_id 唯一；同轮重试复用；同一对话复用 source_session_key。
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={copySkill}
+              className="shrink-0 rounded-md border border-border bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90"
+            >
+              {copied ? "已复制" : "复制模板"}
+            </button>
           </div>
-        )}
+          <pre className="max-h-[520px] overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed">
+            {skillMd}
+          </pre>
+        </section>
 
-        {token && (
-          <>
-            <section className="rounded-lg border border-border bg-card p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                    我的接入 Token
-                  </div>
-                  <div className="text-xs text-muted-foreground">身份：{name}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => copy(token, "token")}
-                  className="rounded-md border border-border bg-secondary px-3 py-1 text-xs hover:bg-secondary/80"
-                >
-                  {copied === "token" ? "已复制" : "复制 Token"}
-                </button>
-              </div>
-              <code className="block break-all rounded-md bg-muted p-3 font-mono text-xs">
-                {token}
-              </code>
-              <p className="mt-2 text-xs text-muted-foreground">
-                Token 相当于你的登录凭证，只贴到 WorkBuddy 的 SKILL.md 里，不要外发。
-              </p>
-            </section>
-
-            <section className="rounded-lg border border-border bg-card p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium">SKILL.md 内容</div>
-                <button
-                  type="button"
-                  onClick={() => copy(skillMd, "skill")}
-                  className="rounded-md border border-border bg-primary px-3 py-1 text-xs text-primary-foreground hover:bg-primary/90"
-                >
-                  {copied === "skill" ? "已复制" : "复制 SKILL.md"}
-                </button>
-              </div>
-              <pre className="max-h-[420px] overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed">
-                {skillMd}
-              </pre>
-            </section>
-
-            <section className="rounded-lg border border-border bg-card p-4 text-sm">
-              <div className="mb-2 font-medium">安装步骤（一次即可）</div>
-              <ol className="list-decimal space-y-1 pl-5 text-muted-foreground">
-                <li>打开 WorkBuddy → 技能栏 → 新建自定义 Skill。</li>
-                <li>
-                  把上方内容整段粘贴进去，命名 <code>superbrain-sync</code>，保存。
-                </li>
-                <li>下次对话，AI 会自动在每轮回复后触发同步，不需你手动做任何事。</li>
-              </ol>
-              <div className="mt-3 text-xs text-muted-foreground">
-                若同步不生效：让 WorkBuddy 说「运行 superbrain-sync 技能」一次以确认识别。
-              </div>
-            </section>
-          </>
-        )}
+        <section className="rounded-lg border border-border bg-card p-4 text-sm">
+          <div className="mb-2 font-medium">更新步骤</div>
+          <ol className="list-decimal space-y-1 pl-5 text-muted-foreground">
+            <li>删除 WorkBuddy 中旧的 superbrain-sync Skill。</li>
+            <li>等本页生成新的接入凭证后，再复制完整新版模板。</li>
+            <li>新对话首轮生成 source_session_key，此后持续复用；每轮另生成 event_id。</li>
+          </ol>
+        </section>
       </div>
     </div>
   );

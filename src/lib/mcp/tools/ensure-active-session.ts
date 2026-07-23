@@ -1,54 +1,32 @@
 import { defineTool } from "@lovable.dev/mcp-js";
 import { z } from "zod";
-import { getMyStudent, unauth } from "./_supabase";
 
 export default defineTool({
   name: "ensure_active_session",
-  title: "获取或创建当前会话 / Ensure active session",
+  title: "已停用 / Deprecated",
   description:
-    "返回当前学员最近 6 小时内最新的会话 id;若没有则自动创建一个。用法:每轮对话开始前调用一次拿到 session_id,再调用 log_turn。零参数即可。",
+    "已停用：可靠 log_turn 不接受云端 session id。客户端应为本地对话维护稳定的 source_session_key。",
   inputSchema: {
-    title: z
-      .string()
-      .min(1)
-      .max(200)
-      .optional()
-      .describe("若需要新建时使用的会话标题,缺省用 '未命名任务 <时间>'"),
+    source_session_key: z.string().trim().min(1).max(255).optional(),
   },
-  annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
-  handler: async ({ title }, ctx) => {
-    if (!ctx.isAuthenticated()) return unauth();
-    const { supabase, student } = await getMyStudent(ctx);
-    if (!student)
-      return { content: [{ type: "text", text: "未找到学员档案(仅学员角色可用)" }], isError: true };
-
-    const sixHoursAgo = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
-    const { data: recent } = await supabase
-      .from("sessions")
-      .select("id, session_title, updated_at")
-      .eq("student_id", student.id)
-      .gte("updated_at", sixHoursAgo)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (recent) {
-      return {
-        content: [{ type: "text", text: `复用会话 "${recent.session_title}" (id=${recent.id})` }],
-        structuredContent: { session_id: recent.id, reused: true },
-      };
-    }
-
-    const fallback = title ?? `未命名任务 ${new Date().toLocaleString("zh-CN", { hour12: false })}`;
-    const { data, error } = await supabase
-      .from("sessions")
-      .insert({ student_id: student.id, session_title: fallback, session_group: "task" })
-      .select("id, session_title")
-      .single();
-    if (error) return { content: [{ type: "text", text: error.message }], isError: true };
+  annotations: {
+    readOnlyHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  handler: async ({ source_session_key }) => {
+    const suggestedKey = source_session_key ?? `workbuddy-conversation-${crypto.randomUUID()}`;
     return {
-      content: [{ type: "text", text: `已新建会话 "${data.session_title}" (id=${data.id})` }],
-      structuredContent: { session_id: data.id, reused: false },
+      content: [
+        {
+          type: "text",
+          text: `此工具已停用。请直接调用 log_turn，并在同一段本地对话中复用 source_session_key=${suggestedKey}`,
+        },
+      ],
+      structuredContent: {
+        deprecated: true,
+        source_session_key: suggestedKey,
+      },
     };
   },
 });

@@ -1,11 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { z } from "zod";
+import {
+  InvalidWorkbuddyCredentialError,
+  ReliableWorkbuddyTurnSchema,
+  RevokedWorkbuddyCredentialError,
+  WorkbuddyEventConflictError,
+  type ReliableWorkbuddyTurn,
+} from "@/lib/workbuddy/contracts";
+import type { WorkbuddyIngestResult } from "@/lib/workbuddy/events.server";
+
+export const MAX_WORKBUDDY_INGEST_BODY_BYTES = 200_000;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Workbuddy-Signature, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Max-Age": "86400",
 } as const;
 
@@ -16,174 +24,201 @@ function json(body: unknown, status = 200) {
   });
 }
 
-const ItemSchema = z.object({
-  kind: z.enum(["prompt", "reply", "diagnosis", "mentor"]),
-  text: z.string().min(1).max(8000),
-  tag: z.string().max(40).optional().nullable(),
-  severity: z.enum(["ok", "warn", "error"]).optional().nullable(),
-});
+class PayloadTooLargeError extends Error {}
+class InvalidPayloadEncodingError extends Error {}
 
-const PayloadSchema = z.object({
-  student: z
-    .object({
-      user_id: z.string().uuid().optional(),
-      email: z.string().email().optional(),
-      display_name: z.string().min(1).max(80).optional(),
-    })
-    .optional(),
-  session: z
-    .object({
-      id: z.string().uuid().optional(),
-      title: z.string().min(1).max(120).optional(),
-      group: z.enum(["space", "task"]).optional(),
-    })
-    .optional(),
-  items: z.array(ItemSchema).min(1).max(50),
-});
+async function readBodyWithLimit(request: Request, maximumBytes: number): Promise<string> {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (Number.isFinite(parsedLength) && parsedLength > maximumBytes) {
+      throw new PayloadTooLargeError();
+    }
+  }
 
-function verifySignature(rawBody: string, header: string | null, secret: string): boolean {
-  if (!header) return false;
-  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-  const given = header.startsWith("sha256=") ? header.slice(7) : header;
-  const a = Buffer.from(expected, "hex");
-  const b = Buffer.from(given, "hex");
-  if (a.length !== b.length || a.length === 0) return false;
-  return timingSafeEqual(a, b);
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    byteLength += value.byteLength;
+    if (byteLength > maximumBytes) {
+      await reader.cancel();
+      throw new PayloadTooLargeError();
+    }
+    chunks.push(value);
+  }
+
+  const body = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch {
+    throw new InvalidPayloadEncodingError();
+  }
+}
+
+function bearerToken(request: Request): string | null {
+  const authorization = request.headers.get("authorization");
+  const match = authorization?.match(/^Bearer[ \t]+(.+)$/i);
+  const token = match?.[1]?.trim();
+  return token ? token : null;
+}
+
+type IngestRouteDependencies = {
+  resolveCredential(presentedToken: string): Promise<{ studentId: string }>;
+  ingestTurn(input: {
+    studentId: string;
+    turn: ReliableWorkbuddyTurn;
+  }): Promise<WorkbuddyIngestResult>;
+  maximumBodyBytes?: number;
+};
+
+function unauthorized() {
+  return json(
+    {
+      error: {
+        code: "UNAUTHORIZED",
+        message: "Invalid WorkBuddy credential",
+      },
+    },
+    401,
+  );
+}
+
+function invalidPayload() {
+  return json(
+    {
+      error: {
+        code: "INVALID_PAYLOAD",
+        message: "Invalid WorkBuddy payload",
+      },
+    },
+    400,
+  );
+}
+
+export function createWorkbuddyIngestPostHandler(dependencies: IngestRouteDependencies) {
+  return async (request: Request): Promise<Response> => {
+    let rawBody: string;
+    try {
+      rawBody = await readBodyWithLimit(
+        request,
+        dependencies.maximumBodyBytes ?? MAX_WORKBUDDY_INGEST_BODY_BYTES,
+      );
+    } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        return json(
+          {
+            error: {
+              code: "PAYLOAD_TOO_LARGE",
+              message: "Payload too large",
+            },
+          },
+          413,
+        );
+      }
+      if (error instanceof InvalidPayloadEncodingError) {
+        return invalidPayload();
+      }
+      console.error("[WorkBuddy ingest] request body read failed");
+      return json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }, 500);
+    }
+
+    const token = bearerToken(request);
+    if (!token) return unauthorized();
+
+    let studentId: string;
+    try {
+      ({ studentId } = await dependencies.resolveCredential(token));
+    } catch (error) {
+      if (
+        error instanceof InvalidWorkbuddyCredentialError ||
+        error instanceof RevokedWorkbuddyCredentialError
+      ) {
+        return unauthorized();
+      }
+      console.error("[WorkBuddy ingest] credential lookup failed");
+      return json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }, 500);
+    }
+
+    let turn: ReliableWorkbuddyTurn;
+    try {
+      turn = ReliableWorkbuddyTurnSchema.parse(JSON.parse(rawBody));
+    } catch {
+      return invalidPayload();
+    }
+
+    try {
+      const result = await dependencies.ingestTurn({ studentId, turn });
+      return json({
+        ok: true,
+        event_id: result.event_id,
+        session_id: result.session_id,
+        item_ids: {
+          prompt: result.prompt_item_id,
+          reply: result.reply_item_id,
+          diagnosis: result.diagnosis_item_id,
+        },
+        duplicate: result.duplicate,
+      });
+    } catch (error) {
+      if (error instanceof WorkbuddyEventConflictError) {
+        return json(
+          {
+            error: {
+              code: "EVENT_ID_CONFLICT",
+              message: "Event ID conflicts with stored payload",
+            },
+          },
+          409,
+        );
+      }
+
+      console.error("[WorkBuddy ingest] atomic ingest failed");
+      return json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }, 500);
+    }
+  };
+}
+
+async function post(request: Request): Promise<Response> {
+  try {
+    const [
+      { supabaseAdmin },
+      { createSupabaseWorkbuddyCredentialGateway, resolveWorkbuddyCredential },
+      { createSupabaseWorkbuddyIngestGateway, ingestWorkbuddyTurn },
+    ] = await Promise.all([
+      import("@/integrations/supabase/client.server"),
+      import("@/lib/workbuddy/credentials.server"),
+      import("@/lib/workbuddy/events.server"),
+    ]);
+
+    const credentialGateway = createSupabaseWorkbuddyCredentialGateway(supabaseAdmin);
+    const ingestGateway = createSupabaseWorkbuddyIngestGateway(supabaseAdmin);
+    return createWorkbuddyIngestPostHandler({
+      resolveCredential: (presentedToken) =>
+        resolveWorkbuddyCredential(presentedToken, { gateway: credentialGateway }),
+      ingestTurn: (input) => ingestWorkbuddyTurn(input, { gateway: ingestGateway }),
+    })(request);
+  } catch {
+    console.error("[WorkBuddy ingest] server dependency initialization failed");
+    return json({ error: { code: "INTERNAL_ERROR", message: "Internal server error" } }, 500);
+  }
 }
 
 export const Route = createFileRoute("/api/public/workbuddy/ingest")({
   server: {
     handlers: {
       OPTIONS: async () => new Response(null, { status: 204, headers: CORS }),
-      POST: async ({ request }) => {
-        const secret = process.env.WORKBUDDY_INGEST_SECRET;
-        if (!secret) return json({ error: "Server not configured" }, 500);
-
-        const raw = await request.text();
-        if (raw.length > 200_000) return json({ error: "Payload too large" }, 413);
-
-        // Two auth modes:
-        // 1) Per-student bearer token (SKILL.md flow, simple for the AI)
-        // 2) HMAC signature over raw body (server-to-server flow)
-        const authHeader = request.headers.get("authorization") ?? "";
-        const bearer = authHeader.toLowerCase().startsWith("bearer ")
-          ? authHeader.slice(7).trim()
-          : "";
-        const hasSig = !!request.headers.get("x-workbuddy-signature");
-        if (!bearer && !hasSig) {
-          return json({ error: "Missing Authorization bearer or X-Workbuddy-Signature" }, 401);
-        }
-        if (
-          !bearer &&
-          !verifySignature(raw, request.headers.get("x-workbuddy-signature"), secret)
-        ) {
-          return json({ error: "Invalid signature" }, 401);
-        }
-
-        let parsed;
-        try {
-          parsed = PayloadSchema.parse(JSON.parse(raw));
-        } catch (e) {
-          return json({ error: "Invalid payload", detail: (e as Error).message }, 400);
-        }
-
-        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-        // Resolve student
-        let studentId: string | null = null;
-        let authorId: string | null = null;
-        if (bearer) {
-          const { data } = await supabaseAdmin
-            .from("students")
-            .select("id, user_id")
-            .eq("workbuddy_token", bearer)
-            .maybeSingle();
-          if (!data) return json({ error: "Invalid student token" }, 401);
-          studentId = data.id;
-          authorId = data.user_id;
-        }
-        const s = parsed.student ?? {};
-        if (!studentId && s.user_id) {
-          const { data } = await supabaseAdmin
-            .from("students")
-            .select("id")
-            .eq("user_id", s.user_id)
-            .maybeSingle();
-          studentId = data?.id ?? null;
-        }
-        if (!studentId && s.email) {
-          // Find auth user by email
-          const { data: list } = await supabaseAdmin.auth.admin.listUsers();
-          const authUser = list?.users.find(
-            (u) => u.email?.toLowerCase() === s.email!.toLowerCase(),
-          );
-          if (authUser) {
-            const { data } = await supabaseAdmin
-              .from("students")
-              .select("id")
-              .eq("user_id", authUser.id)
-              .maybeSingle();
-            studentId = data?.id ?? null;
-          }
-        }
-        if (!studentId && s.display_name) {
-          const { data } = await supabaseAdmin
-            .from("students")
-            .select("id")
-            .eq("display_name", s.display_name)
-            .limit(1)
-            .maybeSingle();
-          studentId = data?.id ?? null;
-        }
-        if (!studentId) {
-          return json({ error: "Student not found", student: s }, 404);
-        }
-
-        // Resolve or create session
-        const sess = parsed.session ?? {};
-        let sessionId = sess.id ?? null;
-        if (!sessionId) {
-          const title = sess.title ?? "WorkBuddy 会话";
-          const group = sess.group ?? "task";
-          const { data: existing } = await supabaseAdmin
-            .from("sessions")
-            .select("id")
-            .eq("student_id", studentId)
-            .eq("session_title", title)
-            .maybeSingle();
-          if (existing) {
-            sessionId = existing.id;
-          } else {
-            const { data: created, error: csErr } = await supabaseAdmin
-              .from("sessions")
-              .insert({ student_id: studentId, session_title: title, session_group: group })
-              .select("id")
-              .single();
-            if (csErr || !created)
-              return json({ error: "Failed to create session", detail: csErr?.message }, 500);
-            sessionId = created.id;
-          }
-        }
-
-        const rows = parsed.items.map((it) => ({
-          session_id: sessionId!,
-          kind: it.kind,
-          text: it.text,
-          tag: it.tag ?? "WorkBuddy",
-          severity: it.severity ?? null,
-          author_id: authorId,
-        }));
-
-        const { error: insErr } = await supabaseAdmin.from("timeline_items").insert(rows);
-        if (insErr) return json({ error: "Insert failed", detail: insErr.message }, 500);
-
-        return json({
-          ok: true,
-          student_id: studentId,
-          session_id: sessionId,
-          inserted: rows.length,
-        });
-      },
+      POST: async ({ request }) => post(request),
     },
   },
 });

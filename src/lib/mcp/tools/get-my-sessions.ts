@@ -5,7 +5,8 @@ import { getMyStudent, unauth } from "./_supabase";
 export default defineTool({
   name: "get_my_sessions",
   title: "获取我的会话列表 / List my sessions",
-  description: "列出当前学员最近的会话,便于选择要写入的 session_id。",
+  description:
+    "只读列出当前学员最近的云端历史会话。可靠 log_turn 不接受这里返回的 id，而是使用本地 source_session_key。",
   inputSchema: {
     limit: z.number().int().min(1).max(50).optional().describe("最多返回条数,默认 10"),
   },

@@ -1,91 +1,124 @@
 import { defineTool } from "@lovable.dev/mcp-js";
 import { z } from "zod";
-import { getMyStudent, supabaseForUser, unauth } from "./_supabase";
+import { WorkbuddyEventConflictError } from "@/lib/workbuddy/contracts";
+import { getMyStudent, unauth } from "./_supabase";
 
 export default defineTool({
   name: "log_turn",
   title: "记录一轮对话 / Log a full turn",
   description:
-    "**每一轮学员对话都必须调用此工具**,一次性把学员提问 + AI 回复(+ 可选诊断)写入云端 timeline。若未提供 session_id 会自动复用最近 6 小时的会话或新建。这是同步聊天记录到导师观察台的核心工具。",
+    "**每一轮学员对话都必须调用此工具**。使用稳定的 event_id 去重，并以 source_session_key 将同一 WorkBuddy 对话持续映射到同一个云端会话。",
   inputSchema: {
-    session_id: z
+    event_id: z.string().uuid().describe("本轮稳定 UUID；重试必须复用同一个值"),
+    source_session_key: z
       .string()
-      .uuid()
+      .trim()
+      .min(1)
+      .max(255)
+      .describe("当前 WorkBuddy 对话的稳定标识；同一对话的每轮必须复用"),
+    session_title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
       .optional()
-      .describe("目标会话 id;缺省时自动 ensure_active_session"),
-    prompt: z.string().min(1).max(4000).describe("学员本轮的原始提问"),
-    reply: z.string().min(1).max(8000).describe("AI 本轮给学员的完整回复"),
+      .describe("首次创建云端会话时显示的标题；不会参与会话复用判断"),
+    prompt: z.string().trim().min(1).max(4000).describe("学员本轮的原始提问"),
+    reply: z.string().trim().min(1).max(8000).describe("AI 本轮给学员的完整回复"),
     diagnosis: z
       .object({
-        text: z.string().min(1).max(2000),
+        text: z.string().trim().min(1).max(2000),
         severity: z.enum(["ok", "warn", "error"]),
       })
       .optional()
-      .describe("可选:AI 对学员当前状态的诊断。severity=error 会触发导师端红色告警"),
-    tag: z.string().max(60).optional().describe("可选标签,例如 'PLC/联锁'"),
+      .describe("可选：AI 对学员当前状态的诊断"),
+    client_created_at: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .describe("本轮发生时间；ISO 8601 格式"),
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-  handler: async ({ session_id, prompt, reply, diagnosis, tag }, ctx) => {
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  handler: async (
+    { event_id, source_session_key, session_title, prompt, reply, diagnosis, client_created_at },
+    ctx,
+  ) => {
     if (!ctx.isAuthenticated()) return unauth();
-    const { supabase, student } = await getMyStudent(ctx);
-    if (!student) return { content: [{ type: "text", text: "未找到学员档案" }], isError: true };
-    const sb = supabaseForUser(ctx);
 
-    let sid = session_id;
-    if (!sid) {
-      const sixHoursAgo = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
-      const { data: recent } = await supabase
-        .from("sessions")
-        .select("id")
-        .eq("student_id", student.id)
-        .gte("updated_at", sixHoursAgo)
-        .order("updated_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (recent) sid = recent.id;
-      else {
-        const { data: created, error: cErr } = await supabase
-          .from("sessions")
-          .insert({
-            student_id: student.id,
-            session_title: `WorkBuddy 对话 ${new Date().toLocaleString("zh-CN", { hour12: false })}`,
-            session_group: "task",
-          })
-          .select("id")
-          .single();
-        if (cErr) return { content: [{ type: "text", text: cErr.message }], isError: true };
-        sid = created.id;
+    const { student } = await getMyStudent(ctx);
+    if (!student) {
+      return {
+        content: [{ type: "text", text: "未找到当前登录账号对应的学员档案" }],
+        isError: true,
+      };
+    }
+
+    try {
+      const [{ supabaseAdmin }, { createSupabaseWorkbuddyIngestGateway, ingestWorkbuddyTurn }] =
+        await Promise.all([
+          import("@/integrations/supabase/client.server"),
+          import("@/lib/workbuddy/events.server"),
+        ]);
+      const gateway = createSupabaseWorkbuddyIngestGateway(supabaseAdmin);
+      const result = await ingestWorkbuddyTurn(
+        {
+          // student.id came from the authenticated user's RLS-scoped lookup.
+          // The MCP input never accepts a student or session database id.
+          studentId: student.id,
+          turn: {
+            event_id,
+            source: "mcp",
+            source_session_key,
+            session_title: session_title ?? "WorkBuddy 对话",
+            prompt,
+            reply,
+            diagnosis,
+            client_created_at,
+          },
+        },
+        { gateway },
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: result.duplicate
+              ? `本轮已同步，无需重复写入（session=${result.session_id}）`
+              : `已同步本轮对话（session=${result.session_id}）`,
+          },
+        ],
+        structuredContent: {
+          event_id: result.event_id,
+          session_id: result.session_id,
+          prompt_item_id: result.prompt_item_id,
+          reply_item_id: result.reply_item_id,
+          diagnosis_item_id: result.diagnosis_item_id,
+          duplicate: result.duplicate,
+        },
+      };
+    } catch (error) {
+      if (error instanceof WorkbuddyEventConflictError) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "event_id 已用于另一份内容，请为新的一轮生成新的 UUID",
+            },
+          ],
+          isError: true,
+        };
       }
+      console.error("[WorkBuddy MCP] atomic log_turn failed");
+      return {
+        content: [{ type: "text", text: "同步失败，请使用相同 event_id 重试" }],
+        isError: true,
+      };
     }
-
-    const tagValue = tag ? `WB · ${tag}` : "WorkBuddy";
-    const authorId = ctx.getUserId()!;
-    const rows: Array<{
-      session_id: string;
-      kind: "prompt" | "reply" | "diagnosis";
-      text: string;
-      tag: string;
-      author_id: string;
-      severity?: "ok" | "warn" | "error";
-    }> = [
-      { session_id: sid!, kind: "prompt", text: prompt, tag: tagValue, author_id: authorId },
-      { session_id: sid!, kind: "reply", text: reply, tag: tagValue, author_id: authorId },
-    ];
-    if (diagnosis) {
-      rows.push({
-        session_id: sid!,
-        kind: "diagnosis",
-        text: diagnosis.text,
-        tag: tagValue,
-        author_id: authorId,
-        severity: diagnosis.severity,
-      });
-    }
-    const { error } = await sb.from("timeline_items").insert(rows);
-    if (error) return { content: [{ type: "text", text: error.message }], isError: true };
-    return {
-      content: [{ type: "text", text: `已同步本轮对话到 session=${sid} (${rows.length} 条)` }],
-      structuredContent: { session_id: sid, inserted: rows.length },
-    };
   },
 });
