@@ -960,7 +960,9 @@ describe("mentor administration delivery contracts", () => {
     expect(source.match(/context\.userId/g)?.length).toBeGreaterThanOrEqual(4);
     expect(source).toContain('await import("./admin.server")');
     expect(source).toContain("z.string().uuid()");
-    expect(source).toContain("z.string().min(8).max(256)");
+    expect(source.match(/temporaryPassword:\s*z\.string\(\)\.min\(8\)\.max\(256\)/g)).toHaveLength(
+      2,
+    );
     expect(source).not.toContain("client.server");
     expect(source).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
   });

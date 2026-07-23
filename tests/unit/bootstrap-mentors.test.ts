@@ -9,6 +9,9 @@ import {
 } from "../../scripts/bootstrap-mentors";
 
 const fixturePassword = ["fixture", "bootstrap", "8!"].join("-");
+const sevenCharacterFixture = ["abc", "1234"].join("");
+const sixCharacterFixture = ["abc", "123"].join("");
+const belowBootstrapMinimumFixture = ["ab", "123"].join("");
 
 function createService(existing: string[] = []) {
   const calls: Array<{
@@ -46,6 +49,73 @@ function createService(existing: string[] = []) {
 }
 
 describe("mentor bootstrap", () => {
+  test("accepts a seven-character temporary password for trusted bootstrap", async () => {
+    const { calls, service } = createService();
+
+    await runMentorBootstrap({
+      config: {
+        usernames: ["mentor.fixture"],
+        adminUsername: "mentor.fixture",
+      },
+      passwordReader: {
+        async readPassword() {
+          return sevenCharacterFixture;
+        },
+      },
+      service,
+      logger: { info() {} },
+    });
+
+    expect(calls).toEqual([
+      {
+        username: "mentor.fixture",
+        temporaryPassword: sevenCharacterFixture,
+        isTeamAdmin: true,
+      },
+    ]);
+  });
+
+  test("aligns trusted bootstrap with the six-character provider minimum", async () => {
+    const { calls, service } = createService();
+
+    await runMentorBootstrap({
+      config: {
+        usernames: ["mentor.fixture"],
+        adminUsername: "mentor.fixture",
+      },
+      passwordReader: {
+        async readPassword() {
+          return sixCharacterFixture;
+        },
+      },
+      service,
+      logger: { info() {} },
+    });
+
+    expect(calls).toHaveLength(1);
+  });
+
+  test("rejects trusted-bootstrap passwords below the provider minimum", async () => {
+    const { calls, service } = createService();
+
+    await expect(
+      runMentorBootstrap({
+        config: {
+          usernames: ["mentor.fixture"],
+          adminUsername: "mentor.fixture",
+        },
+        passwordReader: {
+          async readPassword() {
+            return belowBootstrapMinimumFixture;
+          },
+        },
+        service,
+        logger: { info() {} },
+      }),
+    ).rejects.toThrow("临时密码长度必须为 6–256 个字符");
+    expect(calls).toEqual([]);
+  });
+
   test("uses the injected masked password reader only for missing usernames", async () => {
     const { calls, service } = createService(["existing.fixture"]);
     const prompts: string[] = [];

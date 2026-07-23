@@ -200,8 +200,8 @@ export async function runMentorBootstrap({
       }
       throw new Error("导师账号初始化失败");
     }
-    if (temporaryPassword.length < 8 || temporaryPassword.length > 256) {
-      throw new Error("临时密码长度必须为 8–256 个字符");
+    if (temporaryPassword.length < 6 || temporaryPassword.length > 256) {
+      throw new Error("临时密码长度必须为 6–256 个字符");
     }
 
     try {
@@ -268,7 +268,7 @@ if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
         "管理员用户名必须包含在导师用户名列表中",
         "密码必须通过交互式 TTY 安全输入",
         "导师账号初始化已取消",
-        "临时密码长度必须为 8–256 个字符",
+        "临时密码长度必须为 6–256 个字符",
       ].includes(error.message)
         ? error.message
         : "导师账号初始化失败";
