@@ -450,8 +450,18 @@ export type Database = {
           _author_user_id: string;
           _session_id: string;
           _severity?: Database["public"]["Enums"]["severity"] | null;
-          _student_id: string;
           _text: string;
+        };
+        Returns: Json;
+      };
+      create_ai_response: {
+        Args: {
+          _actor_user_id: string;
+          _diagnosis_severity: Database["public"]["Enums"]["severity"] | null;
+          _diagnosis_text: string | null;
+          _reply: string;
+          _session_id: string;
+          _tag: string | null;
         };
         Returns: Json;
       };
@@ -468,6 +478,13 @@ export type Database = {
       get_workbuddy_credential_status: {
         Args: {
           _user_id: string;
+        };
+        Returns: Json;
+      };
+      get_timeline_delivery_snapshot: {
+        Args: {
+          _actor_user_id: string;
+          _session_id: string;
         };
         Returns: Json;
       };

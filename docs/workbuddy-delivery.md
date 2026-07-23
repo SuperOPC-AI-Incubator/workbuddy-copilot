@@ -9,6 +9,46 @@ mentor timeline path creates them. Fetch and acknowledgement state lives in
 Supabase, so an application restart does not lose pending messages or reset
 delivery counters.
 
+## Mentor send and visible status
+
+The mentor page never inserts a mentor timeline row from the browser. Its
+authenticated server function derives the author from the verified bearer
+token and calls the service-role-only `create_mentor_message` RPC. That RPC
+requires an active mentor or team administrator whose first password change is
+complete, derives the student from the selected session, and lets the existing
+timeline trigger create the pending delivery in the same transaction. A
+delivery-trigger failure rolls the timeline insert back.
+
+Mentor timeline cards show independent channel facts rather than collapsing
+them into one state:
+
+- `待 WorkBuddy 获取`: no valid fetch has occurred.
+- `WorkBuddy 已获取`: WorkBuddy fetched the message but has not acknowledged a
+  later completed-turn display.
+- `WorkBuddy 已送达`: acknowledgement is present.
+- `网页已查看`: at least half of the mentor card was visible to the learner in
+  the foreground web tab. This may be shown together with any WorkBuddy state
+  and never sets `acknowledged_at`.
+- `历史消息（无投递记录）`: a legacy mentor item has no delivery row.
+
+Invalid or out-of-order state is shown conservatively and never claims a false
+delivery. Only a parseable acknowledgement at or after the last successful
+fetch removes a message from the pending total; legacy messages without a
+delivery row remain explicitly historical and do not count. Timeline and
+delivery are read through one joined snapshot. On `CHANNEL_ERROR`, `TIMED_OUT`,
+or `CLOSED`, the page uses the authenticated server read path at 5, 10, 20,
+then 30-second intervals. `SUBSCRIBED` invalidates stale requests, clears the
+polling timer, and immediately performs a fresh authoritative read. Timeline
+or delivery Realtime events also request a complete joined snapshot, so a
+single row event cannot replace or omit older history. All initial,
+post-subscription, Realtime-event, and disconnect-poll requests pass through
+one single-flight refresh scheduler. Events arriving during a load coalesce
+into one immediate follow-up snapshot. A temporary snapshot failure retries
+even while Realtime remains connected, at 5, 10, 20, then capped 30-second
+delays until success. Success resets that backoff; a session change or unmount
+invalidates stale work and clears its applicable timers. Hiding the tab pauses
+the separate disconnect-poll timer.
+
 ## Fetch pending messages
 
 ```http
@@ -162,6 +202,31 @@ service-role mentor RPC and authenticated mentor insert boundary. The fetch
 RPC also checks for manually corrupted legacy content and fails closed; the
 public route converts that failure to its sanitized `500` envelope rather
 than returning or truncating the message.
+
+## Domain packs and optional AI
+
+`DOMAIN_PACK` is read only in server AI code. The safe default,
+`general-learning-camp`, uses Pioneers Learning Community / 学习营地 context.
+`industrial-automation` explicitly enables PLC and industrial automation
+context. Unknown values log only a sanitized warning and fall back to the
+general pack.
+
+`DEEPSEEK_API_KEY` is optional for the delivery loop. When it is absent, AI
+draft and answer actions return a clear unavailable result; manual mentor
+send, timeline status, MCP delivery, and the fallback connector continue to
+work.
+
+Provider failures are normalized to stable internal codes before they reach a
+server-function boundary. Provider response bodies, endpoint details, and keys
+are never returned or logged. The browser maps only known codes to fixed
+Chinese messages and restores the learner's composer input after every failed
+request.
+
+AI replies and optional diagnoses are persisted by the service-only
+`create_ai_response` RPC. The verified bearer actor must resolve to the student
+who owns the selected session. Reply and diagnosis inserts run in one database
+transaction, so a diagnosis failure also rolls back its reply and the server
+returns success only after persistence completes.
 
 ## Credential lifecycle
 

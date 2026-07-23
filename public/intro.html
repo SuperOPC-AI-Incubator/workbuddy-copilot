@@ -226,15 +226,15 @@
     <header>
       <div class="container">
         <div class="badge">SuperBrain Copilot</div>
-        <h1>工业自动化 AI 导师观察台</h1>
+        <h1>学习营地导师协作台</h1>
         <p class="subtitle">
-          为「SuperBrain AI 孵化器」定制的 PLC 学习辅导系统：学员在 WorkBuddy 中提问，AI
-          自动同步到导师端，导师可实时介入、批注、辅导。
+          面向 Pioneers Learning Community 学习营地的协作系统：学员在 WorkBuddy
+          中记录学习过程，导师可实时介入、批注和辅导。
         </p>
         <div class="meta">
           <span>🔗 WorkBuddy 联动</span>
           <span>⚡ Supabase Realtime</span>
-          <span>🤖 Deepseek AI</span>
+          <span>🤖 AI 可选辅助</span>
           <span>🔐 RLS 角色权限</span>
         </div>
       </div>
@@ -270,11 +270,8 @@
           </div>
           <div class="card">
             <div class="icon">🤖</div>
-            <h3>AI 先答、导师后介入</h3>
-            <p>
-              Deepseek 先给出 PLC 领域回复，并自动判断学员是否卡壳；导师随后可一键 AI
-              润色或直接回复。
-            </p>
+            <h3>导师先行、AI 可选辅助</h3>
+            <p>没有配置 AI 时，导师仍可直接回复并完成消息投递；配置后可生成回答和导师草稿。</p>
           </div>
           <div class="card">
             <div class="icon">🛡️</div>
@@ -307,9 +304,7 @@
           <div class="arrow">→</div>
           <div class="step">正常对话，自动上传</div>
         </div>
-        <p>
-          SKILL.md 中写死「每次回复后必须调用 curl 同步」，并绑定学员专属 Bearer Token，无需 OAuth。
-        </p>
+        <p>接入配置会在每轮结束后同步学习记录，并绑定学员专属 Bearer Token，无需 OAuth。</p>
       </section>
 
       <section class="section">
@@ -325,7 +320,7 @@
           reply / diagnosis / mentor）、severity。
         </p>
         <h3>右侧：回复与 AI 辅助</h3>
-        <p>导师可直接输入回复；点击「AI 润色」按钮由 Deepseek 生成专业 mentor 回复草稿。</p>
+        <p>导师可直接输入回复；配置可选的 AI 服务后，也可以生成 mentor 回复草稿。</p>
       </section>
 
       <section class="section">
@@ -343,8 +338,8 @@
           </div>
           <div class="card">
             <div class="icon">🧠</div>
-            <h3>Deepseek</h3>
-            <p>deepseek-chat 模型用于学生问答、导师回复润色、诊断分级。</p>
+            <h3>可选 AI 服务</h3>
+            <p>可用于学生问答、导师草稿和诊断分级；未配置时不影响人工导师功能。</p>
           </div>
           <div class="card">
             <div class="icon">🛠️</div>

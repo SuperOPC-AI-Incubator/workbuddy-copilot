@@ -1,10 +1,23 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-meta";
 import type { Severity, TimelineKind } from "@/lib/timeline-meta";
 import { useServerFn } from "@tanstack/react-start";
 import { askAI, draftMentorTip } from "@/lib/ai.functions";
+import { getAIUserMessage } from "@/lib/ai-user-messages";
+import { createComposeRevisionController } from "@/lib/draft-composition";
+import { createDraftSubmissionController } from "@/lib/draft-submission";
+import { sendMentorMessage } from "@/lib/mentor-messages.functions";
+import { createRealtimePollingController } from "@/lib/realtime-polling";
+import { createMonotonicRefreshController } from "@/lib/timeline-refresh";
+import {
+  describeTimelineDelivery,
+  pendingMentorDeliveryCount,
+  type TimelineDeliveryRecord,
+} from "@/lib/timeline-delivery";
+import { getTimelineDeliveryView } from "@/lib/timeline-view.functions";
+import { createWebSeenVisibilityController } from "@/lib/web-seen-visibility";
 import {
   MENTOR_MESSAGE_INPUT_MAX_CODE_UNITS,
   MENTOR_MESSAGE_MAX_CHARACTERS,
@@ -37,8 +50,12 @@ type TimelineItem = {
   text: string;
   severity: Severity | null;
   tag: string | null;
-  author_id: string | null;
+  author_username: string | null;
   created_at: string;
+};
+type TimelineDelivery = TimelineDeliveryRecord & {
+  message_id: string;
+  session_id: string;
 };
 
 const toEpoch = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
@@ -48,6 +65,7 @@ function MentorDesk() {
   const [students, setStudents] = useState<Student[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  const [deliveries, setDeliveries] = useState<Record<string, TimelineDelivery>>({});
   const [currentStudentId, setCurrentStudentId] = useState<string | null>(null);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [composeText, setComposeText] = useState("");
@@ -57,9 +75,86 @@ function MentorDesk() {
   const [role, setRole] = useState<"mentor" | "student" | null>(null);
   const [isTeamAdmin, setIsTeamAdmin] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
+  const [mentorSendBusy, setMentorSendBusy] = useState(false);
   const [composeError, setComposeError] = useState<string | null>(null);
   const askAIFn = useServerFn(askAI);
   const draftFn = useServerFn(draftMentorTip);
+  const sendMentorMessageFn = useServerFn(sendMentorMessage);
+  const timelineDeliveryViewFn = useServerFn(getTimelineDeliveryView);
+  const timelineDeliveryViewFnRef = useRef(timelineDeliveryViewFn);
+  timelineDeliveryViewFnRef.current = timelineDeliveryViewFn;
+  const currentSessionIdRef = useRef(currentSessionId);
+  currentSessionIdRef.current = currentSessionId;
+  const composeTextRef = useRef(composeText);
+  composeTextRef.current = composeText;
+  const composeRevisionControllerRef = useRef<ReturnType<
+    typeof createComposeRevisionController
+  > | null>(null);
+  const mentorSubmissionControllerRef = useRef<ReturnType<
+    typeof createDraftSubmissionController
+  > | null>(null);
+  const studentSubmissionControllerRef = useRef<ReturnType<
+    typeof createDraftSubmissionController
+  > | null>(null);
+  const webSeenControllerRef = useRef<ReturnType<typeof createWebSeenVisibilityController> | null>(
+    null,
+  );
+  const mentorCardElementsRef = useRef(
+    new Map<string, { item: TimelineItem; element: HTMLElement }>(),
+  );
+
+  if (!mentorSubmissionControllerRef.current) {
+    mentorSubmissionControllerRef.current = createDraftSubmissionController({
+      readDraft: () => composeTextRef.current,
+      clearDraft: () => setComposeText(""),
+      onBusyChange: setMentorSendBusy,
+    });
+  }
+  if (!studentSubmissionControllerRef.current) {
+    studentSubmissionControllerRef.current = createDraftSubmissionController({
+      readDraft: () => composeTextRef.current,
+      clearDraft: () => setComposeText(""),
+      onBusyChange: setAiBusy,
+    });
+  }
+  if (!composeRevisionControllerRef.current) {
+    composeRevisionControllerRef.current = createComposeRevisionController({
+      readText: () => composeTextRef.current,
+      readSessionId: () => currentSessionIdRef.current,
+      applyDraft: (draft) => setComposeText(draft),
+    });
+  }
+
+  const changeCurrentSession = useCallback((sessionId: string | null) => {
+    currentSessionIdRef.current = sessionId;
+    composeRevisionControllerRef.current?.invalidateSession();
+    setCurrentSessionId(sessionId);
+  }, []);
+
+  useEffect(
+    () => () => {
+      composeRevisionControllerRef.current?.invalidateComponent();
+    },
+    [],
+  );
+
+  const registerMentorCardElement = useCallback(
+    (item: TimelineItem, element: HTMLElement | null) => {
+      const previous = mentorCardElementsRef.current.get(item.id);
+      if (previous?.element === element) return;
+      if (previous) {
+        webSeenControllerRef.current?.unobserve(previous.element);
+        mentorCardElementsRef.current.delete(item.id);
+      }
+      if (!element) return;
+      mentorCardElementsRef.current.set(item.id, { item, element });
+      webSeenControllerRef.current?.observe(
+        { messageId: item.id, sessionId: item.session_id, kind: item.kind },
+        element,
+      );
+    },
+    [],
+  );
 
   // Tick every minute so "24h no sync" stays accurate without a full refetch.
   const [now, setNow] = useState(() => Date.now());
@@ -259,7 +354,7 @@ function MentorDesk() {
               n.onclick = () => {
                 window.focus();
                 setCurrentStudentId(studentId);
-                setCurrentSessionId(row.session_id);
+                changeCurrentSession(row.session_id);
                 n.close();
               };
             } catch {
@@ -284,12 +379,12 @@ function MentorDesk() {
     return () => {
       supabase.removeChannel(ch);
     };
-  }, [role]);
+  }, [role, changeCurrentSession]);
 
   const dismissAlert = (id: string) => setAlerts((prev) => prev.filter((a) => a.id !== id));
   const jumpToAlert = (a: { id: string; sessionId: string; studentId: string }) => {
     setCurrentStudentId(a.studentId);
-    setCurrentSessionId(a.sessionId);
+    changeCurrentSession(a.sessionId);
     dismissAlert(a.id);
   };
 
@@ -298,7 +393,7 @@ function MentorDesk() {
     let mounted = true;
     supabase
       .from("students")
-      .select("id, user_id, display_name, last_severity, last_active_at, created_at, updated_at")
+      .select("id, display_name, last_severity, last_active_at")
       .order("last_active_at", { ascending: false })
       .then(({ data }) => {
         if (!mounted || !data) return;
@@ -350,7 +445,7 @@ function MentorDesk() {
         if (!mounted || !data) return;
         setSessions(data as Session[]);
         if (!currentSessionId || !data.some((s) => s.id === currentSessionId)) {
-          setCurrentSessionId(data[0]?.id ?? null);
+          changeCurrentSession(data[0]?.id ?? null);
         }
       });
 
@@ -386,18 +481,34 @@ function MentorDesk() {
   useEffect(() => {
     if (!currentSessionId) {
       setTimeline([]);
+      setDeliveries({});
       return;
     }
-    let mounted = true;
-    supabase
-      .from("timeline_items")
-      .select("*")
-      .eq("session_id", currentSessionId)
-      .order("created_at", { ascending: true })
-      .then(({ data }) => {
-        if (!mounted || !data) return;
-        setTimeline(data as TimelineItem[]);
-      });
+    const refreshController = createMonotonicRefreshController({
+      load: () =>
+        timelineDeliveryViewFnRef.current({
+          data: { sessionId: currentSessionId },
+        }),
+      apply: (result) => {
+        setTimeline(result.timeline as TimelineItem[]);
+        setDeliveries(
+          Object.fromEntries(
+            (result.deliveries as TimelineDelivery[]).map((delivery) => [
+              delivery.message_id,
+              delivery,
+            ]),
+          ),
+        );
+      },
+      onError: () => console.warn("[MentorTimeline]", { code: "TIMELINE_REFRESH_FAILED" }),
+    });
+    void refreshController.refresh();
+
+    const polling = createRealtimePollingController({
+      poll: () => refreshController.refresh(),
+      onPollError: () => console.warn("[MentorTimeline]", { code: "TIMELINE_POLL_FAILED" }),
+      onInvalidate: () => refreshController.invalidate(),
+    });
 
     const ch = supabase
       .channel(`timeline-rt-${currentSessionId}`)
@@ -409,21 +520,103 @@ function MentorDesk() {
           table: "timeline_items",
           filter: `session_id=eq.${currentSessionId}`,
         },
-        (payload) => {
-          setTimeline((prev) =>
-            applyChange(
-              prev,
-              payload,
-              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-            ),
-          );
+        () => {
+          void refreshController.refresh();
         },
       )
-      .subscribe();
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "mentor_message_deliveries",
+          filter: `session_id=eq.${currentSessionId}`,
+        },
+        () => {
+          void refreshController.refresh();
+        },
+      )
+      .subscribe((status) => {
+        setWsConnected(status === "SUBSCRIBED");
+        if (status === "SUBSCRIBED") {
+          refreshController.invalidate();
+          polling.handleStatus(status);
+          void refreshController.refresh();
+        } else {
+          polling.handleStatus(status);
+        }
+      });
+    const handleVisibility = () => polling.setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", handleVisibility);
+    handleVisibility();
     return () => {
-      mounted = false;
+      document.removeEventListener("visibilitychange", handleVisibility);
+      refreshController.stop();
+      polling.stop();
       supabase.removeChannel(ch);
     };
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    webSeenControllerRef.current?.stop();
+    webSeenControllerRef.current = null;
+    if (role !== "student" || !currentSessionId || typeof IntersectionObserver === "undefined") {
+      return;
+    }
+
+    const controller = createWebSeenVisibilityController({
+      role,
+      sessionId: currentSessionId,
+      isDocumentVisible: () => document.visibilityState === "visible",
+      markSeen: async (messageIds) => {
+        const { error } = await supabase.rpc("mark_mentor_messages_web_seen", {
+          _message_ids: messageIds,
+        });
+        if (error) throw new Error("MENTOR_WEB_SEEN_FAILED");
+      },
+      createObserver: (callback, options) => {
+        const observer = new IntersectionObserver(
+          (entries) =>
+            callback(
+              entries.map((entry) => ({
+                target: entry.target,
+                isIntersecting: entry.isIntersecting,
+                intersectionRatio: entry.intersectionRatio,
+              })),
+            ),
+          { threshold: options.threshold },
+        );
+        return {
+          observe: (element) => observer.observe(element as Element),
+          unobserve: (element) => observer.unobserve(element as Element),
+          disconnect: () => observer.disconnect(),
+        };
+      },
+      onMarkError: () => console.warn("[MentorTimeline]", { code: "MENTOR_WEB_SEEN_FAILED" }),
+    });
+    webSeenControllerRef.current = controller;
+    for (const { item, element } of mentorCardElementsRef.current.values()) {
+      controller.observe(
+        { messageId: item.id, sessionId: item.session_id, kind: item.kind },
+        element,
+      );
+    }
+
+    const handleVisibility = () => controller.handleDocumentVisibility();
+    document.addEventListener("visibilitychange", handleVisibility);
+    handleVisibility();
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      controller.stop();
+      if (webSeenControllerRef.current === controller) {
+        webSeenControllerRef.current = null;
+      }
+    };
+  }, [role, currentSessionId]);
+
+  useEffect(() => {
+    mentorSubmissionControllerRef.current?.invalidate();
+    studentSubmissionControllerRef.current?.invalidate();
   }, [currentSessionId]);
 
   const currentStudent = students.find((s) => s.id === currentStudentId) ?? null;
@@ -431,7 +624,7 @@ function MentorDesk() {
 
   const selectStudent = (id: string) => {
     setCurrentStudentId(id);
-    setCurrentSessionId(null);
+    changeCurrentSession(null);
     setComposeError(null);
   };
 
@@ -443,51 +636,54 @@ function MentorDesk() {
       setComposeError("导师消息最多 8000 个字符，请缩短后再发送。");
       return;
     }
-    setComposeText("");
     setComposeError(null);
-    const { data: userRes } = await supabase.auth.getUser();
-    const { error } = await supabase.from("timeline_items").insert({
-      session_id: currentSessionId,
-      kind: "mentor",
-      text,
-      author_id: userRes.user?.id ?? null,
+    const outcome = await mentorSubmissionControllerRef.current!.submit((capturedDraft) => {
+      composeRevisionControllerRef.current?.noteManualSendStart();
+      return sendMentorMessageFn({
+        data: { sessionId: currentSessionId, text: capturedDraft.trim(), severity: null },
+      });
     });
-    if (error) {
-      console.error(error);
-      setComposeText(text);
-      setComposeError(
-        error.code === "22023" || error.code === "23514"
-          ? "导师消息最多 8000 个字符，请缩短后再发送。"
-          : "导师消息发送失败，请稍后重试。",
-      );
+    if (outcome.started && outcome.succeeded) {
+      composeRevisionControllerRef.current?.noteManualSendSuccess();
+    }
+    if (outcome.started && !outcome.succeeded) {
+      setComposeError("导师消息发送失败，请稍后重试。");
     }
   };
 
   const sendStudentPrompt = async (e: FormEvent) => {
     e.preventDefault();
     const text = composeText.trim();
-    if (!text || !currentSessionId || aiBusy) return;
-    setComposeText("");
+    if (!text || !currentSessionId) return;
     setComposeError(null);
-    setAiBusy(true);
-    try {
-      await askAIFn({ data: { sessionId: currentSessionId, prompt: text } });
-    } catch (err) {
-      console.error(err);
-      setComposeText(text);
-      alert("AI 请求失败：" + (err as Error).message);
-    } finally {
-      setAiBusy(false);
+    const outcome = await studentSubmissionControllerRef.current!.submit(
+      (capturedDraft) =>
+        askAIFn({ data: { sessionId: currentSessionId, prompt: capturedDraft.trim() } }),
+      (result) => result.ok,
+    );
+    if (!outcome.started || outcome.succeeded) return;
+    if (!outcome.result) {
+      console.warn("[MentorDesk]", { code: "AI_REQUEST_FAILED" });
     }
+    const code = outcome.result && !outcome.result.ok ? outcome.result.code : "AI_REQUEST_FAILED";
+    alert(getAIUserMessage(code, "student"));
   };
 
   const draftTip = async () => {
     if (!currentSessionId || aiBusy) return;
     setAiBusy(true);
     try {
-      const { draft } = await draftFn({ data: { sessionId: currentSessionId } });
-      if (draft) {
-        setComposeText(draft);
+      const outcome = await composeRevisionControllerRef.current!.requestDraft(
+        () => draftFn({ data: { sessionId: currentSessionId } }),
+        (result) => (result.available ? result.draft : null),
+      );
+      const { result } = outcome;
+      if (!result.available) {
+        alert(getAIUserMessage(result.code, "draft"));
+        return;
+      }
+      const { draft } = result;
+      if (draft && outcome.applied) {
         const submissionDraft = draft.trim();
         setComposeError(
           submissionDraft && !isMentorMessageWithinLimit(submissionDraft)
@@ -495,9 +691,9 @@ function MentorDesk() {
             : null,
         );
       }
-    } catch (err) {
-      console.error(err);
-      alert("草稿生成失败：" + (err as Error).message);
+    } catch {
+      console.warn("[MentorDesk]", { code: "AI_DRAFT_FAILED" });
+      alert(getAIUserMessage("AI_DRAFT_FAILED", "draft"));
     } finally {
       setAiBusy(false);
     }
@@ -521,7 +717,7 @@ function MentorDesk() {
 
   const createSession = async () => {
     if (role !== "student" || !currentStudentId) return;
-    const title = prompt("新对话标题？", "PLC 学习会话");
+    const title = prompt("新对话标题？", "学习会话");
     if (!title) return;
     const { data, error } = await supabase
       .from("sessions")
@@ -532,7 +728,7 @@ function MentorDesk() {
       alert("创建失败：" + error.message);
       return;
     }
-    if (data) setCurrentSessionId(data.id);
+    if (data) changeCurrentSession(data.id);
   };
 
   const signOut = async () => {
@@ -653,18 +849,20 @@ function MentorDesk() {
           currentId={currentSessionId}
           collapsed={collapsed}
           onToggle={(g) => setCollapsed((c) => ({ ...c, [g]: !c[g] }))}
-          onSelect={setCurrentSessionId}
+          onSelect={changeCurrentSession}
           student={currentStudent}
           canCreate={role === "student" && !!currentStudentId}
           onCreate={createSession}
         />
         <TimelinePanel
           items={timeline}
+          deliveries={deliveries}
           student={currentStudent}
           session={currentSession}
           composeText={composeText}
           composeError={composeError}
           onComposeChange={(value) => {
+            composeRevisionControllerRef.current?.noteUserChange();
             setComposeText(value);
             const submissionText = value.trim();
             setComposeError(
@@ -676,8 +874,10 @@ function MentorDesk() {
           onSend={role === "student" ? sendStudentPrompt : sendMentor}
           role={role}
           aiBusy={aiBusy}
+          mentorSendBusy={mentorSendBusy}
           onDraftTip={draftTip}
           onCallMentor={callMentor}
+          onMentorCardElement={registerMentorCardElement}
         />
       </main>
     </div>
@@ -740,7 +940,7 @@ function TopBar({
         <div className="flex flex-col leading-tight">
           <h1 className="text-sm font-semibold tracking-wide">WorkBuddy Copilot</h1>
           <span className="text-[11px]" style={{ color: "var(--sidebar-muted)" }}>
-            导师观察台 · PLC 实时学习辅助
+            导师观察台 · 学习营地实时协作
           </span>
         </div>
       </div>
@@ -1016,6 +1216,7 @@ function SessionGroup({
 /* ─── Timeline Panel ────────────────────────────────────── */
 function TimelinePanel({
   items,
+  deliveries,
   student,
   session,
   composeText,
@@ -1024,10 +1225,13 @@ function TimelinePanel({
   onSend,
   role,
   aiBusy,
+  mentorSendBusy,
   onDraftTip,
   onCallMentor,
+  onMentorCardElement,
 }: {
   items: TimelineItem[];
+  deliveries: Record<string, TimelineDelivery>;
   student: Student | null;
   session: Session | null;
   composeText: string;
@@ -1036,8 +1240,10 @@ function TimelinePanel({
   onSend: (e: FormEvent) => void;
   role: "mentor" | "student" | null;
   aiBusy: boolean;
+  mentorSendBusy: boolean;
   onDraftTip: () => void;
   onCallMentor: () => void;
+  onMentorCardElement: (item: TimelineItem, element: HTMLElement | null) => void;
 }) {
   const isStudent = role === "student";
   const mentorSubmissionText = composeText.trim();
@@ -1046,6 +1252,9 @@ function TimelinePanel({
     !isStudent &&
     Boolean(mentorSubmissionText) &&
     !isMentorMessageWithinLimit(mentorSubmissionText);
+  const pendingCount = pendingMentorDeliveryCount(
+    items.filter((item) => item.kind === "mentor").map((item) => deliveries[item.id] ?? null),
+  );
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <div className="flex shrink-0 items-start justify-between border-b bg-card px-6 py-3">
@@ -1055,7 +1264,7 @@ function TimelinePanel({
           </h2>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {student ? `${student.display_name} · ` : ""}
-            {session ? `${items.length} 条事件` : "—"}
+            {session ? `${items.length} 条事件 · ${pendingCount} 条待送达` : "—"}
           </p>
         </div>
       </div>
@@ -1065,7 +1274,12 @@ function TimelinePanel({
         ) : (
           <ol className="relative space-y-3 border-l-2 border-border pl-6">
             {items.map((item) => (
-              <TimelineCard key={item.id} item={item} />
+              <TimelineCard
+                key={item.id}
+                item={item}
+                delivery={deliveries[item.id] ?? null}
+                onCardElement={item.kind === "mentor" ? onMentorCardElement : undefined}
+              />
             ))}
           </ol>
         )}
@@ -1078,12 +1292,12 @@ function TimelinePanel({
             onChange={(e) => onComposeChange(e.target.value)}
             maxLength={isStudent ? 2_000 : MENTOR_MESSAGE_INPUT_MAX_CODE_UNITS}
             aria-invalid={Boolean(composeError)}
-            disabled={!session || aiBusy}
+            disabled={!session}
             placeholder={
               !session
                 ? "选中对话后可发送…"
                 : isStudent
-                  ? "向 AI 提问 PLC 相关问题…"
+                  ? "向 AI 提问当前学习问题…"
                   : `向 ${student?.display_name ?? "学员"} 发送导师提示…`
             }
             className="flex-1 rounded-md border bg-background px-3 py-2 text-sm outline-none transition-colors focus:border-primary disabled:cursor-not-allowed disabled:opacity-50"
@@ -1092,7 +1306,7 @@ function TimelinePanel({
             <button
               type="button"
               onClick={onDraftTip}
-              disabled={!session || aiBusy}
+              disabled={!session || aiBusy || mentorSendBusy}
               className="rounded-md border px-3 py-2 text-sm transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
               title="用 AI 起草一条导师提示"
             >
@@ -1116,11 +1330,16 @@ function TimelinePanel({
           )}
           <button
             type="submit"
-            disabled={!session || !composeText.trim() || aiBusy || mentorMessageTooLong}
+            disabled={
+              !session ||
+              !composeText.trim() ||
+              (isStudent ? aiBusy : mentorSendBusy) ||
+              mentorMessageTooLong
+            }
             className="rounded-md px-4 py-2 text-sm font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
             style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
           >
-            {isStudent ? (aiBusy ? "AI 回答中…" : "提问") : "发送"}
+            {isStudent ? (aiBusy ? "AI 回答中…" : "提问") : mentorSendBusy ? "发送中…" : "发送"}
           </button>
         </form>
         {!isStudent && (
@@ -1139,12 +1358,25 @@ function TimelinePanel({
   );
 }
 
-function TimelineCard({ item }: { item: TimelineItem }) {
+function TimelineCard({
+  item,
+  delivery,
+  onCardElement,
+}: {
+  item: TimelineItem;
+  delivery: TimelineDelivery | null;
+  onCardElement?: (item: TimelineItem, element: HTMLElement | null) => void;
+}) {
+  const cardRef = useCallback(
+    (element: HTMLElement | null) => onCardElement?.(item, element),
+    [item, onCardElement],
+  );
   const meta = KIND_META[item.kind];
   const ts = toEpoch(item.created_at);
   const tag = item.tag ?? "";
   const fromWorkBuddy = tag.startsWith("WB") || tag === "WorkBuddy";
   const displayTag = tag.startsWith("WB · ") ? tag.slice(5) : tag === "WorkBuddy" ? "" : tag;
+  const deliveryStatus = item.kind === "mentor" ? describeTimelineDelivery(delivery) : null;
   return (
     <li className="relative">
       <span
@@ -1152,6 +1384,7 @@ function TimelineCard({ item }: { item: TimelineItem }) {
         style={{ background: meta.dot }}
       />
       <article
+        ref={cardRef}
         className="rounded-lg border p-3.5 shadow-sm"
         style={{ background: meta.bg, borderColor: meta.border }}
       >
@@ -1178,6 +1411,14 @@ function TimelineCard({ item }: { item: TimelineItem }) {
             {item.severity && item.kind === "diagnosis" && (
               <SeverityBadge severity={item.severity} />
             )}
+            {deliveryStatus?.labels.map((label) => (
+              <span
+                key={label}
+                className="rounded-full border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[10px] text-foreground"
+              >
+                {label}
+              </span>
+            ))}
           </div>
           <time className="text-muted-foreground">{formatTime(ts)}</time>
         </header>

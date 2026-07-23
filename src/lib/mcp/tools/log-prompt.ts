@@ -10,7 +10,7 @@ export default defineTool({
   inputSchema: {
     session_id: z.string().uuid().describe("目标会话 id"),
     text: z.string().min(1).max(4000).describe("学员的提问原文"),
-    tag: z.string().max(60).optional().describe("可选标签,例如 'PLC/联锁'"),
+    tag: z.string().max(60).optional().describe("可选标签,例如 '目标/复盘'"),
   },
   annotations: {
     readOnlyHint: false,

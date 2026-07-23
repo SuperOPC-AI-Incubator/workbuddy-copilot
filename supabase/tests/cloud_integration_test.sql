@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(109);
+SELECT plan(124);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -937,16 +937,45 @@ SELECT is(
   'same student/source/key reuses the existing session regardless of title'
 );
 
+SELECT throws_ok(
+  $test$
+    SELECT public.create_mentor_message(
+      _author_user_id => '10000000-0000-0000-0000-000000000102'::uuid,
+      _session_id => (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      _text => 'Disabled staff must not send'
+    )
+  $test$,
+  '42501',
+  'active_staff_account_required',
+  'disabled staff cannot create mentor messages'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.create_mentor_message(
+      _author_user_id => '10000000-0000-0000-0000-000000000104'::uuid,
+      _session_id => (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      _text => 'Password-change gate must block sending'
+    )
+  $test$,
+  '42501',
+  'active_staff_account_required',
+  'password-change-required staff cannot create mentor messages'
+);
+
 INSERT INTO cloud_test_results (label, result)
 SELECT
   'student_one_message',
   public.create_mentor_message(
     _author_user_id => '10000000-0000-0000-0000-000000000101'::uuid,
-    _student_id => (
-      SELECT id
-      FROM public.students
-      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
-    ),
     _session_id => (
       SELECT (result ->> 'session_id')::uuid
       FROM cloud_test_results
@@ -1048,11 +1077,6 @@ SELECT
   'student_two_message',
   public.create_mentor_message(
     _author_user_id => '10000000-0000-0000-0000-000000000101'::uuid,
-    _student_id => (
-      SELECT id
-      FROM public.students
-      WHERE user_id = '10000000-0000-0000-0000-000000000002'::uuid
-    ),
     _session_id => (
       SELECT (result ->> 'session_id')::uuid
       FROM cloud_test_results
@@ -1061,7 +1085,234 @@ SELECT
     _text => 'Student two mentor message'
   );
 
+SELECT ok(
+  (
+    SELECT
+      snapshot.result ->> 'session_id'
+        = (
+          SELECT result ->> 'session_id'
+          FROM cloud_test_results
+          WHERE label = 'first_ingest'
+        )
+      AND EXISTS (
+        SELECT 1
+        FROM pg_catalog.jsonb_array_elements(snapshot.result -> 'items') AS entry
+        WHERE entry -> 'timeline' ->> 'id' = (
+          SELECT result ->> 'message_id'
+          FROM cloud_test_results
+          WHERE label = 'student_one_message'
+        )
+          AND entry -> 'delivery' ->> 'message_id'
+            = entry -> 'timeline' ->> 'id'
+      )
+    FROM (
+      SELECT public.get_timeline_delivery_snapshot(
+        '10000000-0000-0000-0000-000000000001'::uuid,
+        (
+          SELECT (result ->> 'session_id')::uuid
+          FROM cloud_test_results
+          WHERE label = 'first_ingest'
+        )
+      ) AS result
+    ) AS snapshot
+  ),
+  'student snapshot returns one coherent timeline and delivery join'
+);
+
+SELECT is(
+  public.get_timeline_delivery_snapshot(
+    '10000000-0000-0000-0000-000000000101'::uuid,
+    (
+      SELECT (result ->> 'session_id')::uuid
+      FROM cloud_test_results
+      WHERE label = 'first_ingest'
+    )
+  ) ->> 'session_id',
+  (
+    SELECT result ->> 'session_id'
+    FROM cloud_test_results
+    WHERE label = 'first_ingest'
+  ),
+  'active completed mentor can read the joined timeline snapshot'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.get_timeline_delivery_snapshot(
+      '10000000-0000-0000-0000-000000000001'::uuid,
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'student_two_ingest'
+      )
+    )
+  $test$,
+  '42501',
+  'timeline_snapshot_forbidden',
+  'student snapshot cannot read another student session'
+);
+
 RESET ROLE;
+
+CREATE OR REPLACE FUNCTION public.cloud_test_force_delivery_failure()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $function$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.timeline_items AS item
+    WHERE item.id = NEW.message_id
+      AND item.text = 'force mentor delivery failure'
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'P0001',
+      MESSAGE = 'forced_delivery_failure';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+CREATE TRIGGER cloud_test_force_delivery_failure
+BEFORE INSERT ON public.mentor_message_deliveries
+FOR EACH ROW
+EXECUTE FUNCTION public.cloud_test_force_delivery_failure();
+
+SET LOCAL ROLE service_role;
+
+SELECT throws_ok(
+  $test$
+    SELECT public.create_mentor_message(
+      _author_user_id => '10000000-0000-0000-0000-000000000101'::uuid,
+      _session_id => (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      _text => 'force mentor delivery failure'
+    )
+  $test$,
+  'P0001',
+  'forced_delivery_failure',
+  'a delivery failure escapes the atomic mentor message RPC'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1
+    FROM public.timeline_items
+    WHERE text = 'force mentor delivery failure'
+  ),
+  'a failed delivery insert rolls back the mentor timeline item'
+);
+
+RESET ROLE;
+
+DROP TRIGGER cloud_test_force_delivery_failure
+ON public.mentor_message_deliveries;
+DROP FUNCTION public.cloud_test_force_delivery_failure();
+
+CREATE OR REPLACE FUNCTION public.cloud_test_force_ai_response_failure()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $function$
+BEGIN
+  IF (
+    NEW.kind = 'reply'::public.timeline_kind
+    AND NEW.text = 'force ai reply failure'
+  ) OR (
+    NEW.kind = 'diagnosis'::public.timeline_kind
+    AND NEW.text = 'force ai diagnosis failure'
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = 'P0001',
+      MESSAGE = 'forced_ai_response_failure';
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+CREATE TRIGGER cloud_test_force_ai_response_failure
+BEFORE INSERT ON public.timeline_items
+FOR EACH ROW
+EXECUTE FUNCTION public.cloud_test_force_ai_response_failure();
+
+SET LOCAL ROLE service_role;
+
+SELECT throws_ok(
+  $test$
+    SELECT public.create_ai_response(
+      _actor_user_id => '10000000-0000-0000-0000-000000000001'::uuid,
+      _session_id => (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      _reply => 'force ai reply failure',
+      _diagnosis_text => NULL::text,
+      _diagnosis_severity => NULL::public.severity,
+      _tag => NULL::text
+    )
+  $test$,
+  'P0001',
+  'forced_ai_response_failure',
+  'a failed AI reply escapes the atomic AI response RPC'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1
+    FROM public.timeline_items
+    WHERE text = 'force ai reply failure'
+  ),
+  'a failed AI reply leaves no timeline row'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.create_ai_response(
+      _actor_user_id => '10000000-0000-0000-0000-000000000001'::uuid,
+      _session_id => (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      _reply => 'reply must roll back after diagnosis failure',
+      _diagnosis_text => 'force ai diagnosis failure',
+      _diagnosis_severity => 'warn'::public.severity,
+      _tag => 'rollback'
+    )
+  $test$,
+  'P0001',
+  'forced_ai_response_failure',
+  'a failed diagnosis escapes the atomic AI response RPC'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1
+    FROM public.timeline_items
+    WHERE text = 'reply must roll back after diagnosis failure'
+  ),
+  'a failed diagnosis rolls back the AI reply'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1
+    FROM public.timeline_items
+    WHERE text = 'force ai diagnosis failure'
+  ),
+  'a failed diagnosis leaves no diagnosis row'
+);
+
+RESET ROLE;
+
+DROP TRIGGER cloud_test_force_ai_response_failure
+ON public.timeline_items;
+DROP FUNCTION public.cloud_test_force_ai_response_failure();
 
 CREATE OR REPLACE FUNCTION public.cloud_test_force_timeline_failure()
 RETURNS trigger
@@ -1504,6 +1755,36 @@ RESET ROLE;
 
 SET LOCAL ROLE authenticated;
 SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000001';
+
+SELECT is(
+  has_function_privilege(
+    'authenticated',
+    'public.create_mentor_message(uuid,uuid,text,public.severity)',
+    'EXECUTE'
+  ),
+  false,
+  'student browser cannot call the service-only mentor message RPC'
+);
+
+SELECT is(
+  has_function_privilege(
+    'authenticated',
+    'public.create_ai_response(uuid,uuid,text,text,public.severity,text)',
+    'EXECUTE'
+  ),
+  false,
+  'student browser cannot call the service-only AI response RPC'
+);
+
+SELECT is(
+  has_function_privilege(
+    'authenticated',
+    'public.get_timeline_delivery_snapshot(uuid,uuid)',
+    'EXECUTE'
+  ),
+  false,
+  'student browser cannot call the service-only timeline snapshot RPC'
+);
 
 SELECT is(
   has_function_privilege(
@@ -2224,11 +2505,6 @@ SELECT lives_ok(
     SELECT public.create_mentor_message(
       '10000000-0000-0000-0000-000000000101'::uuid,
       (
-        SELECT id
-        FROM public.students
-        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
-      ),
-      (
         SELECT (result ->> 'session_id')::uuid
         FROM cloud_test_results
         WHERE label = 'first_ingest'
@@ -2244,11 +2520,6 @@ SELECT throws_ok(
   $test$
     SELECT public.create_mentor_message(
       '10000000-0000-0000-0000-000000000101'::uuid,
-      (
-        SELECT id
-        FROM public.students
-        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
-      ),
       (
         SELECT (result ->> 'session_id')::uuid
         FROM cloud_test_results

@@ -7,6 +7,10 @@ const migrationsDirectory = resolve(process.cwd(), "supabase/migrations");
 const roleMigrationPath = resolve(migrationsDirectory, "20260723090000_add_team_admin_role.sql");
 const cloudMigrationPath = resolve(migrationsDirectory, "20260723090100_cloud_integration.sql");
 const deliveryMigrationPath = resolve(migrationsDirectory, "20260723090300_reliable_delivery.sql");
+const mentorSendMigrationPath = resolve(
+  migrationsDirectory,
+  "20260723090400_delivery_status_and_mentor_send.sql",
+);
 const generatedTypesPath = resolve(process.cwd(), "src/integrations/supabase/types.ts");
 const pgTapPath = resolve(process.cwd(), "supabase/tests/cloud_integration_test.sql");
 const concurrencyTestPath = resolve(
@@ -18,6 +22,7 @@ const mentorDeskPath = resolve(process.cwd(), "src/routes/_authenticated/index.t
 const roleMigration = readFileSync(roleMigrationPath, "utf8");
 const cloudMigration = readFileSync(cloudMigrationPath, "utf8");
 const deliveryMigration = readFileSync(deliveryMigrationPath, "utf8");
+const mentorSendMigration = readFileSync(mentorSendMigrationPath, "utf8");
 const generatedTypes = readFileSync(generatedTypesPath, "utf8");
 const pgTap = readFileSync(pgTapPath, "utf8");
 const concurrencyTest = readFileSync(concurrencyTestPath, "utf8");
@@ -433,8 +438,27 @@ describe("cloud integration schema contract", () => {
         _author_user_id: string;
         _session_id: string;
         _severity?: Database["public"]["Enums"]["severity"] | null;
-        _student_id: string;
         _text: string;
+      };
+      Returns: Json;
+    }>();
+    expectTypeOf<Database["public"]["Functions"]["create_ai_response"]>().toEqualTypeOf<{
+      Args: {
+        _actor_user_id: string;
+        _diagnosis_severity: Database["public"]["Enums"]["severity"] | null;
+        _diagnosis_text: string | null;
+        _reply: string;
+        _session_id: string;
+        _tag: string | null;
+      };
+      Returns: Json;
+    }>();
+    expectTypeOf<
+      Database["public"]["Functions"]["get_timeline_delivery_snapshot"]
+    >().toEqualTypeOf<{
+      Args: {
+        _actor_user_id: string;
+        _session_id: string;
       };
       Returns: Json;
     }>();
@@ -831,20 +855,19 @@ describe("cloud integration schema contract", () => {
   });
 
   test("creates mentor messages through one trigger-owned identity and delivery path", () => {
-    const creator = functionDefinition(cloudMigration, "create_mentor_message");
+    const creator = functionDefinition(mentorSendMigration, "create_mentor_message");
     const signature = creator.slice(0, creator.search(/\bRETURNS\b/i));
     const timelineInsert = creator.search(/INSERT\s+INTO\s+public\.timeline_items\b/i);
 
     expect(signature).not.toMatch(/author_username/i);
+    expect(signature).not.toMatch(/_student_id/i);
     expect(creator).toMatch(
-      /public\.has_active_role\s*\(\s*_author_user_id\s*,\s*'mentor'::public\.app_role\s*\)/i,
+      /FROM\s+public\.staff_accounts[\s\S]*?staff\.user_id\s*=\s*_author_user_id[\s\S]*?staff\.is_active\s*=\s*true[\s\S]*?staff\.must_change_password\s*=\s*false/i,
     );
     expect(creator).toMatch(
-      /public\.has_active_role\s*\(\s*_author_user_id\s*,\s*'team_admin'::public\.app_role\s*\)/i,
+      /staff_role\.role\s+IN\s*\([\s\S]*?'mentor'::public\.app_role[\s\S]*?'team_admin'::public\.app_role/i,
     );
-    expect(creator).toMatch(
-      /FROM\s+public\.sessions[\s\S]*?id\s*=\s*_session_id[\s\S]*?student_id\s*=\s*_student_id/i,
-    );
+    expect(creator).toMatch(/FROM\s+public\.sessions[\s\S]*?session_row\.id\s*=\s*_session_id/i);
     expect(timelineInsert).toBeGreaterThanOrEqual(0);
     expect(creator).not.toMatch(/INSERT\s+INTO\s+public\.mentor_message_deliveries\b/i);
     expect(cloudMigration).toMatch(
@@ -863,6 +886,33 @@ describe("cloud integration schema contract", () => {
       /INSERT\s+INTO\s+public\.mentor_message_deliveries[\s\S]*?NEW\.id[\s\S]*?target_session\.student_id[\s\S]*?NEW\.session_id/i,
     );
     expect(creator).toMatch(/'delivery_state'\s*,\s*'pending'/i);
+  });
+
+  test("persists AI reply and diagnosis atomically through a service-only student boundary", () => {
+    const creator = functionDefinition(mentorSendMigration, "create_ai_response");
+    expect(creator).toMatch(
+      /FROM\s+public\.students[\s\S]*?student\.user_id\s*=\s*_actor_user_id/i,
+    );
+    expect(creator).toMatch(
+      /FROM\s+public\.sessions[\s\S]*?target_session\.student_id\s*=\s*actor_student_id/i,
+    );
+    expect(creator.match(/INSERT\s+INTO\s+public\.timeline_items/gi)).toHaveLength(2);
+    expect(creator).toMatch(/'reply'::public\.timeline_kind/);
+    expect(creator).toMatch(/'diagnosis'::public\.timeline_kind/);
+    expect(mentorSendMigration).toMatch(
+      /REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\.create_ai_response[\s\S]*?authenticated[\s\S]*?GRANT\s+EXECUTE[\s\S]*?service_role/i,
+    );
+  });
+
+  test("returns timeline and delivery through one service-only left-joined snapshot", () => {
+    const snapshot = functionDefinition(mentorSendMigration, "get_timeline_delivery_snapshot");
+    expect(snapshot).toMatch(
+      /FROM\s+public\.timeline_items[\s\S]*?LEFT\s+JOIN\s+public\.mentor_message_deliveries/i,
+    );
+    expect(snapshot).toMatch(/_actor_user_id/);
+    expect(mentorSendMigration).toMatch(
+      /REVOKE\s+ALL\s+ON\s+FUNCTION\s+public\.get_timeline_delivery_snapshot[\s\S]*?authenticated[\s\S]*?GRANT\s+EXECUTE[\s\S]*?service_role/i,
+    );
   });
 
   test("hardens the legacy timeline aggregate trigger after client UPDATE revocation", () => {
@@ -1165,11 +1215,19 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*109\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*124\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);
     expect(pgTap).toMatch(/service mentor creation accepts exactly 8000 Unicode characters/i);
+    expect(pgTap).toMatch(/disabled staff cannot create mentor messages/i);
+    expect(pgTap).toMatch(/password-change-required staff cannot create mentor messages/i);
+    expect(pgTap).toMatch(/a failed delivery insert rolls back the mentor timeline item/i);
+    expect(pgTap).toMatch(/student browser cannot call the service-only mentor message RPC/i);
+    expect(pgTap).toMatch(/student browser cannot call the service-only AI response RPC/i);
+    expect(pgTap).toMatch(/a failed diagnosis rolls back the AI reply/i);
+    expect(pgTap).toMatch(/student browser cannot call the service-only timeline snapshot RPC/i);
+    expect(pgTap).toMatch(/student snapshot cannot read another student session/i);
     expect(pgTap).toMatch(/authenticated mentor insert rejects 8001 Unicode characters/i);
     expect(pgTap).toMatch(/service role cannot insert delivery rows directly/i);
     expect(pgTap).toMatch(/service role cannot update delivery rows directly/i);

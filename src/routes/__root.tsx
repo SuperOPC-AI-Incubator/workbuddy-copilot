@@ -80,20 +80,20 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { title: "WorkBuddy Copilot · 导师观察台" },
       {
         name: "description",
-        content: "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
+        content: "面向学习营地的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
       },
       { name: "author", content: "WorkBuddy" },
       { property: "og:title", content: "WorkBuddy Copilot · 导师观察台" },
       {
         property: "og:description",
-        content: "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
+        content: "面向学习营地的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: "WorkBuddy Copilot · 导师观察台" },
       {
         name: "twitter:description",
-        content: "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
+        content: "面向学习营地的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
       },
       {
         property: "og:image",
