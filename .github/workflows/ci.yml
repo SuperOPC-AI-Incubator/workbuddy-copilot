@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Install from the committed public-registry lock
+        run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
+      - name: Reject stale hosted URLs and private artifact registries
+        run: bun run ci:forbidden-hosts
+      - name: Run formatting, lint, types, unit tests, and production build
+        run: bun run check
+
+  local-cloud-loop:
+    name: Ephemeral Supabase and browser loop
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      E2E_TEST_PASSWORD: "CI-only-initial-password-9274!"
+      E2E_TEST_NEW_PASSWORD: "CI-only-new-password-6381!"
+      PLAYWRIGHT_NO_COPY_PROMPT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Install from the committed public-registry lock
+        run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Start disposable local Supabase
+        run: supabase start >/dev/null 2>&1
+      - name: Reapply every migration from an empty database
+        run: supabase db reset
+      - name: Export local keys directly to the job environment
+        run: node scripts/ci/export-local-supabase-env.mjs "$GITHUB_ENV"
+      - name: Run pgTAP database contracts
+        run: supabase test db
+      - name: Seed isolated concurrency identities
+        run: node scripts/ci/seed-local-integration.mjs "$GITHUB_ENV"
+      - name: Run real concurrency tests with zero skips
+        run: bun run test:integration:required
+      - name: Install Chromium runtime
+        run: bunx playwright install --with-deps chromium
+      - name: Prove all four required browser cases have exact RED controls
+        run: bun run test:e2e:negative-control
+      - name: Run mandatory browser E2E with zero skips
+        run: bun run test:e2e:local
+      - name: Create allowlisted browser summary
+        if: always()
+        run: node scripts/ci/sanitize-playwright-report.mjs test-results/required-playwright.json ci-artifacts/local/playwright-summary.json
+      - name: Retain only the sanitized browser summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-cloud-loop-summary
+          path: ci-artifacts/local/playwright-summary.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Stop disposable Supabase
+        if: always()
+        run: supabase stop --no-backup
+
+  connectors:
+    name: Connector install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    env:
+      CONNECTOR_TEST_TOKEN: "wb_ci_connector_only_not_production_6381"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Install from the committed public-registry lock
+        run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
+      - name: Run connector core tests
+        run: bun run test:connectors
+      - name: Exercise the POSIX installer and permissions
+        if: runner.os != 'Windows'
+        shell: sh
+        run: sh tests/connectors/test-posix.sh
+      - name: Exercise the Windows installer, ACL, wrapper, and Skill
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -File tests/connectors/test-windows.ps1
+
+  live-predeploy-gate:
+    name: Live predeploy gate (neutral when unconfigured)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.guard.outputs.ready }}
+    env:
+      LIVE_PREDEPLOY_ENABLED: ${{ vars.LIVE_PREDEPLOY_ENABLED }}
+      LIVE_PREDEPLOY_TEST_PROJECT: ${{ secrets.LIVE_PREDEPLOY_TEST_PROJECT }}
+      E2E_APP_ORIGIN: ${{ secrets.LIVE_PREDEPLOY_APP_ORIGIN }}
+      E2E_SUPABASE_URL: ${{ secrets.LIVE_PREDEPLOY_SUPABASE_URL }}
+      E2E_SUPABASE_ANON_KEY: ${{ secrets.LIVE_PREDEPLOY_SUPABASE_ANON_KEY }}
+      E2E_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.LIVE_PREDEPLOY_SUPABASE_SERVICE_ROLE_KEY }}
+      E2E_TEST_PASSWORD: ${{ secrets.LIVE_PREDEPLOY_TEST_PASSWORD }}
+      E2E_TEST_NEW_PASSWORD: ${{ secrets.LIVE_PREDEPLOY_TEST_NEW_PASSWORD }}
+    steps:
+      - name: Classify optional predeploy without printing secrets
+        id: guard
+        shell: bash
+        run: |
+          if [[ "$LIVE_PREDEPLOY_ENABLED" == "true" &&
+                "$LIVE_PREDEPLOY_TEST_PROJECT" == "true" &&
+                -n "$E2E_APP_ORIGIN" &&
+                -n "$E2E_SUPABASE_URL" &&
+                -n "$E2E_SUPABASE_ANON_KEY" &&
+                -n "$E2E_SUPABASE_SERVICE_ROLE_KEY" &&
+                -n "$E2E_TEST_PASSWORD" &&
+                -n "$E2E_TEST_NEW_PASSWORD" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Live predeploy: READY (disposable test project)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Live predeploy: SKIPPED (neutral; not a production pass)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  live-predeploy:
+    name: Live predeploy (disposable test project only)
+    needs: live-predeploy-gate
+    if: needs.live-predeploy-gate.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LIVE_PREDEPLOY_TEST_PROJECT: ${{ secrets.LIVE_PREDEPLOY_TEST_PROJECT }}
+      E2E_APP_ORIGIN: ${{ secrets.LIVE_PREDEPLOY_APP_ORIGIN }}
+      E2E_SUPABASE_URL: ${{ secrets.LIVE_PREDEPLOY_SUPABASE_URL }}
+      E2E_SUPABASE_ANON_KEY: ${{ secrets.LIVE_PREDEPLOY_SUPABASE_ANON_KEY }}
+      E2E_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.LIVE_PREDEPLOY_SUPABASE_SERVICE_ROLE_KEY }}
+      E2E_TEST_PASSWORD: ${{ secrets.LIVE_PREDEPLOY_TEST_PASSWORD }}
+      E2E_TEST_NEW_PASSWORD: ${{ secrets.LIVE_PREDEPLOY_TEST_NEW_PASSWORD }}
+      PLAYWRIGHT_NO_COPY_PROMPT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+      - name: Require the explicit disposable test-project guard
+        run: node scripts/ci/assert-live-test-environment.mjs
+      - name: Install from the committed public-registry lock
+        run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
+      - name: Install Chromium runtime
+        run: bunx playwright install --with-deps chromium
+      - name: Run cleanable live test-namespace checks
+        run: bun run test:e2e:local
+      - name: Create allowlisted browser summary
+        if: always()
+        run: node scripts/ci/sanitize-playwright-report.mjs test-results/required-playwright.json ci-artifacts/live/playwright-summary.json
+      - name: Retain only the sanitized browser summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-predeploy-test-project-summary
+          path: ci-artifacts/live/playwright-summary.json
+          if-no-files-found: error
+          retention-days: 3

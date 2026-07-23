@@ -16,6 +16,13 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:local": "node scripts/ci/run-required-playwright.mjs",
+    "test:e2e:negative-control": "node scripts/ci/run-e2e-negative-controls.mjs",
+    "test:integration:required": "node scripts/ci/run-required-vitest.mjs",
+    "test:connectors": "vitest run tests/unit/workbuddy-connector.test.ts tests/unit/workbuddy-connectors-surface.test.ts",
+    "test:connectors:posix": "sh tests/connectors/test-posix.sh",
+    "test:connectors:windows": "pwsh -NoLogo -NoProfile -File tests/connectors/test-windows.ps1",
+    "ci:forbidden-hosts": "node scripts/ci/check-forbidden-hosts.mjs",
     "start": "node .output/server/index.mjs",
     "check": "bun run format:check && bun run lint -- --max-warnings=0 && bun run typecheck && bun run test && bun run build"
   },

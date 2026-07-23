@@ -1,0 +1,196 @@
+import { expect, test } from "@playwright/test";
+
+import {
+  E2E_ENVIRONMENT,
+  createE2EHarness,
+  loginWithPassword,
+  type E2EHarness,
+} from "./support/e2e-fixture";
+
+const MISSING_MESSAGE_ID = "00000000-0000-4000-8000-000000000404";
+
+test.describe("WorkBuddy cloud delivery loop", () => {
+  test.skip(!E2E_ENVIRONMENT.available, E2E_ENVIRONMENT.skipReason);
+  test.describe.configure({ mode: "serial", timeout: 120_000 });
+
+  let harness: E2EHarness;
+
+  test.beforeEach(async () => {
+    harness = await createE2EHarness();
+  });
+
+  test.afterEach(async () => {
+    await harness?.cleanup();
+  });
+
+  test("ingest reaches the mentor, reply reaches web and WorkBuddy until acknowledged", async ({
+    browser,
+    page,
+  }) => {
+    const negativeControl = process.env.E2E_NEGATIVE_CONTROL === "workbuddy-delivery";
+    const negativeMarker = negativeControl ? process.env.E2E_NEGATIVE_CONTROL_MARKER : undefined;
+    const mentor = await harness.createStaff({
+      prefix: "loopmentor",
+      mustChangePassword: false,
+      teamAdmin: false,
+    });
+    const student = await harness.createStudent("闭环学员");
+    const otherStudent = await harness.createStudent("隔离学员");
+    const eventId = crypto.randomUUID();
+    const sourceSessionKey = harness.uniqueLabel("workbuddy-session");
+    const title = harness.uniqueLabel("闭环会话");
+    const prompt = harness.uniqueLabel("精确学员问题");
+    const reply = harness.uniqueLabel("精确 WorkBuddy 回答");
+    const diagnosis = harness.uniqueLabel("精确诊断");
+    const turn = {
+      event_id: eventId,
+      source: "connector",
+      source_session_key: sourceSessionKey,
+      session_title: title,
+      prompt,
+      reply,
+      diagnosis: { text: diagnosis, severity: "warn" },
+      client_created_at: new Date().toISOString(),
+    } as const;
+
+    const firstIngest = await harness.publicJson("/api/public/workbuddy/ingest", {
+      method: "POST",
+      token: student.token,
+      body: turn,
+    });
+    expect(firstIngest.status).toBe(200);
+    expect(firstIngest.body).toMatchObject({
+      ok: true,
+      event_id: eventId,
+      duplicate: false,
+      item_ids: {
+        prompt: expect.any(String),
+        reply: expect.any(String),
+        diagnosis: expect.any(String),
+      },
+    });
+    const sessionId = String(firstIngest.body.session_id);
+
+    const duplicate = await harness.publicJson("/api/public/workbuddy/ingest", {
+      method: "POST",
+      token: student.token,
+      body: turn,
+    });
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body).toMatchObject({
+      event_id: eventId,
+      session_id: sessionId,
+      item_ids: firstIngest.body.item_ids,
+      duplicate: true,
+    });
+
+    const conflict = await harness.publicJson("/api/public/workbuddy/ingest", {
+      method: "POST",
+      token: student.token,
+      body: { ...turn, prompt: `${prompt} changed` },
+    });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body).toEqual({
+      error: {
+        code: "EVENT_ID_CONFLICT",
+        message: "Event ID conflicts with stored payload",
+      },
+    });
+
+    await loginWithPassword(page, mentor.username, harness.initialPassword);
+    await page.getByRole("button", { name: student.displayName }).click();
+    await page.getByRole("button", { name: new RegExp(title) }).click();
+    await expect(page.getByText(prompt, { exact: true })).toBeVisible();
+    await expect(page.getByText(reply, { exact: true })).toBeVisible();
+    await expect(page.getByText(diagnosis, { exact: true })).toBeVisible();
+
+    const mentorReply = harness.uniqueLabel("导师精确回复");
+    await page.getByPlaceholder(/发送导师提示/).fill(mentorReply);
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(page.getByText(mentorReply, { exact: true })).toBeVisible();
+
+    const studentContext = await browser.newContext();
+    try {
+      const studentPage = await studentContext.newPage();
+      await loginWithPassword(studentPage, student.email, harness.initialPassword);
+      await studentPage.getByRole("button", { name: new RegExp(title) }).click();
+      await expect(studentPage.getByText(mentorReply, { exact: true })).toBeVisible();
+    } finally {
+      await studentContext.close();
+    }
+
+    const firstFetch = await harness.publicJson(
+      `/api/public/workbuddy/mentor-messages?session_id=${sessionId}`,
+      { method: "GET", token: student.token },
+    );
+    expect(firstFetch.status).toBe(200);
+    expect(firstFetch.body).toMatchObject({
+      ok: true,
+      messages: [
+        {
+          id: expect.any(String),
+          session_id: sessionId,
+          text: mentorReply,
+          author_username: mentor.username,
+          created_at: expect.any(String),
+        },
+      ],
+      next_cursor: null,
+    });
+    const messageId = String((firstFetch.body.messages as Array<{ id: string }>)[0]?.id);
+    expect(
+      (firstFetch.body.messages as Array<{ id: string }>).map(({ id }) => id),
+      negativeMarker,
+    ).toContain(negativeControl ? MISSING_MESSAGE_ID : messageId);
+
+    const repeatedFetch = await harness.publicJson(
+      `/api/public/workbuddy/mentor-messages?session_id=${sessionId}`,
+      { method: "GET", token: student.token },
+    );
+    expect(repeatedFetch.status).toBe(200);
+    expect(repeatedFetch.body.messages).toEqual(firstFetch.body.messages);
+
+    const wrongStudentFetch = await harness.publicJson(
+      `/api/public/workbuddy/mentor-messages?session_id=${sessionId}`,
+      { method: "GET", token: otherStudent.token },
+    );
+    expect(wrongStudentFetch.status).toBe(400);
+    expect(wrongStudentFetch.body).toMatchObject({
+      error: { code: "INVALID_SESSION" },
+    });
+
+    const wrongStudentAck = await harness.publicJson("/api/public/workbuddy/mentor-messages/ack", {
+      method: "POST",
+      token: otherStudent.token,
+      body: { message_ids: [messageId] },
+    });
+    expect(wrongStudentAck.status).toBe(400);
+    expect(wrongStudentAck.body).toMatchObject({
+      error: { code: "INVALID_MESSAGE_IDS" },
+    });
+
+    const acknowledged = await harness.publicJson("/api/public/workbuddy/mentor-messages/ack", {
+      method: "POST",
+      token: student.token,
+      body: { message_ids: [messageId] },
+    });
+    expect(acknowledged.status).toBe(200);
+    expect(acknowledged.body).toMatchObject({
+      ok: true,
+      acknowledged: [{ id: messageId, acknowledged_at: expect.any(String) }],
+    });
+
+    const afterAck = await harness.publicJson(
+      `/api/public/workbuddy/mentor-messages?session_id=${sessionId}`,
+      { method: "GET", token: student.token },
+    );
+    expect(afterAck.status).toBe(200);
+    expect(afterAck.body).toMatchObject({ messages: [], next_cursor: null });
+    await expect(harness.readDelivery(messageId)).resolves.toMatchObject({
+      fetchCount: 2,
+      acknowledged: true,
+      studentId: student.studentId,
+      sessionId,
+    });
+  });
+});
