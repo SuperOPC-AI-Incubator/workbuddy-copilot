@@ -5,6 +5,12 @@ import { KIND_META, SEVERITY_COLOR, formatTime, timeAgo } from "@/lib/timeline-m
 import type { Severity, TimelineKind } from "@/lib/timeline-meta";
 import { useServerFn } from "@tanstack/react-start";
 import { askAI, draftMentorTip } from "@/lib/ai.functions";
+import {
+  MENTOR_MESSAGE_INPUT_MAX_CODE_UNITS,
+  MENTOR_MESSAGE_MAX_CHARACTERS,
+  countUnicodeCharacters,
+  isMentorMessageWithinLimit,
+} from "@/lib/workbuddy/mentor-message-contract";
 
 export const Route = createFileRoute("/_authenticated/")({
   component: MentorDesk,
@@ -51,6 +57,7 @@ function MentorDesk() {
   const [role, setRole] = useState<"mentor" | "student" | null>(null);
   const [isTeamAdmin, setIsTeamAdmin] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
+  const [composeError, setComposeError] = useState<string | null>(null);
   const askAIFn = useServerFn(askAI);
   const draftFn = useServerFn(draftMentorTip);
 
@@ -425,13 +432,19 @@ function MentorDesk() {
   const selectStudent = (id: string) => {
     setCurrentStudentId(id);
     setCurrentSessionId(null);
+    setComposeError(null);
   };
 
   const sendMentor = async (e: FormEvent) => {
     e.preventDefault();
     const text = composeText.trim();
     if (!text || !currentSessionId) return;
+    if (!isMentorMessageWithinLimit(text)) {
+      setComposeError("导师消息最多 8000 个字符，请缩短后再发送。");
+      return;
+    }
     setComposeText("");
+    setComposeError(null);
     const { data: userRes } = await supabase.auth.getUser();
     const { error } = await supabase.from("timeline_items").insert({
       session_id: currentSessionId,
@@ -442,6 +455,11 @@ function MentorDesk() {
     if (error) {
       console.error(error);
       setComposeText(text);
+      setComposeError(
+        error.code === "22023" || error.code === "23514"
+          ? "导师消息最多 8000 个字符，请缩短后再发送。"
+          : "导师消息发送失败，请稍后重试。",
+      );
     }
   };
 
@@ -450,6 +468,7 @@ function MentorDesk() {
     const text = composeText.trim();
     if (!text || !currentSessionId || aiBusy) return;
     setComposeText("");
+    setComposeError(null);
     setAiBusy(true);
     try {
       await askAIFn({ data: { sessionId: currentSessionId, prompt: text } });
@@ -467,7 +486,15 @@ function MentorDesk() {
     setAiBusy(true);
     try {
       const { draft } = await draftFn({ data: { sessionId: currentSessionId } });
-      if (draft) setComposeText(draft);
+      if (draft) {
+        setComposeText(draft);
+        const submissionDraft = draft.trim();
+        setComposeError(
+          submissionDraft && !isMentorMessageWithinLimit(submissionDraft)
+            ? "AI 草稿超过 8000 个字符，请缩短后再发送。"
+            : null,
+        );
+      }
     } catch (err) {
       console.error(err);
       alert("草稿生成失败：" + (err as Error).message);
@@ -636,7 +663,16 @@ function MentorDesk() {
           student={currentStudent}
           session={currentSession}
           composeText={composeText}
-          onComposeChange={setComposeText}
+          composeError={composeError}
+          onComposeChange={(value) => {
+            setComposeText(value);
+            const submissionText = value.trim();
+            setComposeError(
+              role === "mentor" && submissionText && !isMentorMessageWithinLimit(submissionText)
+                ? "导师消息最多 8000 个字符，请缩短后再发送。"
+                : null,
+            );
+          }}
           onSend={role === "student" ? sendStudentPrompt : sendMentor}
           role={role}
           aiBusy={aiBusy}
@@ -983,6 +1019,7 @@ function TimelinePanel({
   student,
   session,
   composeText,
+  composeError,
   onComposeChange,
   onSend,
   role,
@@ -994,6 +1031,7 @@ function TimelinePanel({
   student: Student | null;
   session: Session | null;
   composeText: string;
+  composeError: string | null;
   onComposeChange: (v: string) => void;
   onSend: (e: FormEvent) => void;
   role: "mentor" | "student" | null;
@@ -1002,6 +1040,12 @@ function TimelinePanel({
   onCallMentor: () => void;
 }) {
   const isStudent = role === "student";
+  const mentorSubmissionText = composeText.trim();
+  const mentorCharacterCount = countUnicodeCharacters(mentorSubmissionText);
+  const mentorMessageTooLong =
+    !isStudent &&
+    Boolean(mentorSubmissionText) &&
+    !isMentorMessageWithinLimit(mentorSubmissionText);
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <div className="flex shrink-0 items-start justify-between border-b bg-card px-6 py-3">
@@ -1032,6 +1076,8 @@ function TimelinePanel({
             type="text"
             value={composeText}
             onChange={(e) => onComposeChange(e.target.value)}
+            maxLength={isStudent ? 2_000 : MENTOR_MESSAGE_INPUT_MAX_CODE_UNITS}
+            aria-invalid={Boolean(composeError)}
             disabled={!session || aiBusy}
             placeholder={
               !session
@@ -1070,13 +1116,23 @@ function TimelinePanel({
           )}
           <button
             type="submit"
-            disabled={!session || !composeText.trim() || aiBusy}
+            disabled={!session || !composeText.trim() || aiBusy || mentorMessageTooLong}
             className="rounded-md px-4 py-2 text-sm font-medium transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
             style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
           >
             {isStudent ? (aiBusy ? "AI 回答中…" : "提问") : "发送"}
           </button>
         </form>
+        {!isStudent && (
+          <div className="mt-1 flex items-center justify-between text-xs">
+            <span className="text-destructive" role={composeError ? "alert" : undefined}>
+              {composeError}
+            </span>
+            <span className={mentorMessageTooLong ? "text-destructive" : "text-muted-foreground"}>
+              {mentorCharacterCount}/{MENTOR_MESSAGE_MAX_CHARACTERS} 字符
+            </span>
+          </div>
+        )}
         <Legend />
       </div>
     </section>

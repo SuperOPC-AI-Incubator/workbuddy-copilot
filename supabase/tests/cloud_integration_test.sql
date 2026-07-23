@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(82);
+SELECT plan(109);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -1129,63 +1129,26 @@ DROP TRIGGER cloud_test_force_timeline_failure
 DROP FUNCTION public.cloud_test_force_timeline_failure();
 
 SELECT ok(
-  EXISTS (
+  NOT EXISTS (
     SELECT 1
-    FROM public.workbuddy_credentials AS credential
-    JOIN public.students AS student
-      ON student.id = credential.student_id
-    WHERE credential.token_hash = encode(
-      extensions.digest(student.workbuddy_token, 'sha256'),
-      'hex'
-    )
-      AND credential.source = 'legacy_token_backfill'
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'students'
+      AND column_name = 'workbuddy_token'
   ),
-  'legacy plaintext tokens are idempotently backfilled as annotated hashes'
+  'Task 6 removes the legacy plaintext student credential column'
 );
-
-UPDATE public.students
-SET workbuddy_token = ' x '
-WHERE id = (
-  SELECT id
-  FROM public.students
-  WHERE user_id IS NULL
-  ORDER BY created_at
-  LIMIT 1
-);
-
-INSERT INTO public.workbuddy_credentials (
-  student_id,
-  token_hash,
-  token_prefix,
-  source
-)
-SELECT
-  student.id,
-  encode(extensions.digest(student.workbuddy_token, 'sha256'), 'hex'),
-  left(
-    encode(extensions.digest(student.workbuddy_token, 'sha256'), 'hex'),
-    8
-  ),
-  'legacy_token_backfill'
-FROM public.students AS student
-WHERE student.workbuddy_token = ' x '
-ON CONFLICT (token_hash) DO NOTHING;
 
 SELECT ok(
-  EXISTS (
+  NOT EXISTS (
     SELECT 1
-    FROM public.workbuddy_credentials AS credential
-    JOIN public.students AS student
-      ON student.id = credential.student_id
-    WHERE student.workbuddy_token = ' x '
-      AND credential.token_hash = encode(
-        extensions.digest(student.workbuddy_token, 'sha256'),
-        'hex'
-      )
-      AND credential.token_prefix = left(credential.token_hash, 8)
-      AND credential.source = 'legacy_token_backfill'
+    FROM pg_catalog.pg_proc AS procedure
+    JOIN pg_catalog.pg_namespace AS namespace
+      ON namespace.oid = procedure.pronamespace
+    WHERE namespace.nspname = 'public'
+      AND procedure.proname = 'get_my_legacy_workbuddy_setup'
   ),
-  'short or whitespace legacy tokens backfill through a hash prefix'
+  'Task 6 removes the legacy plaintext transition RPC'
 );
 
 SET LOCAL ROLE service_role;
@@ -1288,6 +1251,68 @@ SELECT throws_ok(
       (
         SELECT id
         FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      )
+    )
+  $test$,
+  '42501',
+  'permission denied for table mentor_message_deliveries',
+  'service role cannot insert delivery rows directly'
+);
+
+SELECT throws_ok(
+  $test$
+    UPDATE public.mentor_message_deliveries
+    SET web_seen_at = pg_catalog.now()
+    WHERE false
+  $test$,
+  '42501',
+  'permission denied for table mentor_message_deliveries',
+  'service role cannot update delivery rows directly'
+);
+
+RESET ROLE;
+
+SELECT throws_ok(
+  $test$
+    UPDATE public.mentor_message_deliveries
+    SET session_id = (
+      SELECT (result ->> 'session_id')::uuid
+      FROM cloud_test_results
+      WHERE label = 'student_two_ingest'
+    )
+    WHERE message_id = (
+      SELECT (result ->> 'message_id')::uuid
+      FROM cloud_test_results
+      WHERE label = 'student_one_message'
+    )
+  $test$,
+  '23514',
+  'mentor_delivery_identity_immutable',
+  'delivery identity columns are immutable'
+);
+
+SELECT throws_ok(
+  $test$
+    INSERT INTO public.mentor_message_deliveries (
+      message_id,
+      student_id,
+      session_id
+    )
+    VALUES (
+      (
+        SELECT (result ->> 'message_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'student_one_message'
+      ),
+      (
+        SELECT id
+        FROM public.students
         WHERE user_id = '10000000-0000-0000-0000-000000000002'::uuid
       ),
       (
@@ -1347,22 +1372,27 @@ SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000101';
 
 SELECT throws_ok(
   $test$
-    SELECT workbuddy_token
-    FROM public.students
-    LIMIT 1
+    SELECT public.get_workbuddy_credential_status(
+      '10000000-0000-0000-0000-000000000001'::uuid
+    )
   $test$,
   '42501',
-  NULL,
-  'authenticated staff cannot select plaintext WorkBuddy tokens'
+  'permission denied for function get_workbuddy_credential_status',
+  'authenticated browsers cannot read credential status directly'
 );
 
 SELECT throws_ok(
   $test$
-    SELECT public.get_my_legacy_workbuddy_setup()
+    SELECT public.issue_workbuddy_credential(
+      '10000000-0000-0000-0000-000000000001'::uuid,
+      repeat('7', 64),
+      'wb_browser',
+      false
+    )
   $test$,
   '42501',
-  'student_identity_required',
-  'authenticated staff cannot use the plaintext transition RPC'
+  'permission denied for function issue_workbuddy_credential',
+  'authenticated browsers cannot issue WorkBuddy credentials directly'
 );
 
 WITH inserted_message AS (
@@ -1476,9 +1506,13 @@ SET LOCAL ROLE authenticated;
 SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000001';
 
 SELECT is(
-  public.get_my_legacy_workbuddy_setup() ->> 'display_name',
-  'Student One',
-  'student plaintext transition RPC remains own-profile compatible'
+  has_function_privilege(
+    'authenticated',
+    'public.get_workbuddy_credential_status(uuid)',
+    'EXECUTE'
+  ),
+  false,
+  'student browser cannot bypass the server-only credential manager'
 );
 
 SELECT throws_ok(
@@ -1693,6 +1727,592 @@ SELECT ok(
   ),
   'web-seen RPC never changes transport fetch ack or failure fields'
 );
+
+SET LOCAL ROLE service_role;
+
+SELECT is(
+  public.get_workbuddy_credential_status(
+    '10000000-0000-0000-0000-000000000001'::uuid
+  ) ->> 'status',
+  'none',
+  'student credential status starts without secret material'
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'first_credential',
+  public.issue_workbuddy_credential(
+    '10000000-0000-0000-0000-000000000001'::uuid,
+    repeat('7', 64),
+    'wb_first77',
+    false
+  )
+);
+
+SELECT ok(
+  (
+    SELECT
+      result ->> 'status' = 'active'
+      AND result -> 'credential' ->> 'prefix' = 'wb_first77'
+      AND NOT (result ? 'token_hash')
+      AND NOT ((result -> 'credential') ? 'token_hash')
+    FROM cloud_test_results
+    WHERE label = 'first_credential'
+  ),
+  'first credential issue returns only safe status and prefix fields'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.issue_workbuddy_credential(
+      '10000000-0000-0000-0000-000000000001'::uuid,
+      repeat('8', 64),
+      'wb_second8',
+      false
+    )
+  $test$,
+  'P4090',
+  'workbuddy_active_credential_exists',
+  'create-first refuses a second active credential'
+);
+
+SELECT ok(
+  (
+    SELECT
+      public.resolve_workbuddy_credential(repeat('7', 64)) ->> 'status' = 'active'
+      AND credential.last_used_at IS NOT NULL
+    FROM public.workbuddy_credentials AS credential
+    WHERE credential.token_hash = repeat('7', 64)
+  ),
+  'issued credential resolves through the shared hash-only bearer path'
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'rotated_credential',
+  public.issue_workbuddy_credential(
+    '10000000-0000-0000-0000-000000000001'::uuid,
+    repeat('8', 64),
+    'wb_rotated8',
+    true
+  )
+);
+
+SELECT is(
+  (
+    SELECT result -> 'credential' ->> 'prefix'
+    FROM cloud_test_results
+    WHERE label = 'rotated_credential'
+  ),
+  'wb_rotated8',
+  'rotation returns the newly issued safe prefix'
+);
+
+SELECT ok(
+  (
+    SELECT
+      pg_catalog.count(*) FILTER (WHERE status = 'active') = 1
+      AND pg_catalog.count(*) FILTER (
+        WHERE token_hash = repeat('7', 64)
+          AND status = 'revoked'
+          AND revoked_at IS NOT NULL
+      ) = 1
+      AND pg_catalog.count(*) FILTER (
+        WHERE token_hash = repeat('8', 64)
+          AND status = 'active'
+          AND revoked_at IS NULL
+      ) = 1
+    FROM public.workbuddy_credentials
+    WHERE student_id = (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    )
+  ),
+  'rotation atomically revokes every old active credential and leaves one active'
+);
+
+SELECT ok(
+  (
+    SELECT
+      status.result ->> 'status' = 'active'
+      AND status.result -> 'credential' ->> 'prefix' = 'wb_rotated8'
+      AND NOT (status.result ? 'token_hash')
+      AND NOT ((status.result -> 'credential') ? 'token_hash')
+    FROM (
+      SELECT public.get_workbuddy_credential_status(
+        '10000000-0000-0000-0000-000000000001'::uuid
+      ) AS result
+    ) AS status
+  ),
+  'credential status never returns a token or hash'
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'revoked_credential',
+  public.revoke_workbuddy_credential(
+    '10000000-0000-0000-0000-000000000001'::uuid
+  )
+);
+
+SELECT is(
+  (
+    SELECT result ->> 'status'
+    FROM cloud_test_results
+    WHERE label = 'revoked_credential'
+  ),
+  'revoked',
+  'student can revoke the current credential'
+);
+
+SELECT is(
+  (
+    SELECT
+      public.revoke_workbuddy_credential(
+        '10000000-0000-0000-0000-000000000001'::uuid
+      ) -> 'credential' ->> 'revoked_at'
+  ),
+  (
+    SELECT result -> 'credential' ->> 'revoked_at'
+    FROM cloud_test_results
+    WHERE label = 'revoked_credential'
+  ),
+  'repeated revoke is idempotent and preserves the first revocation timestamp'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.get_workbuddy_credential_status(
+      '10000000-0000-0000-0000-000000000101'::uuid
+    )
+  $test$,
+  '42501',
+  'student_identity_required',
+  'service role cannot manage a staff identity as a student'
+);
+
+UPDATE public.timeline_items
+SET created_at = '2026-07-23 12:00:00+00'::timestamptz
+WHERE id IN (
+  SELECT (result ->> 'message_id')::uuid
+  FROM cloud_test_results
+  WHERE label IN ('student_one_message', 'direct_mentor_message')
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'delivery_first_fetch',
+  public.fetch_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    NULL,
+    100,
+    NULL,
+    NULL
+  )
+);
+
+SELECT ok(
+  (
+    SELECT
+      pg_catalog.jsonb_array_length(result -> 'messages') = 2
+      AND (result -> 'messages' -> 0 ->> 'created_at')
+        = (result -> 'messages' -> 1 ->> 'created_at')
+      AND (result -> 'messages' -> 0 ->> 'id')
+        < (result -> 'messages' -> 1 ->> 'id')
+      AND pg_catalog.bool_and(
+        delivery.first_fetched_at IS NOT NULL
+        AND delivery.last_fetched_at IS NOT NULL
+        AND delivery.fetch_count = 1
+      )
+    FROM cloud_test_results
+    CROSS JOIN public.mentor_message_deliveries AS delivery
+    WHERE label = 'delivery_first_fetch'
+      AND delivery.message_id IN (
+        SELECT (message ->> 'id')::uuid
+        FROM pg_catalog.jsonb_array_elements(result -> 'messages') AS message
+      )
+    GROUP BY result
+  ),
+  'first fetch is ordered by created_at and id and atomically initializes fetch state'
+);
+
+CREATE TEMP TABLE cloud_test_first_fetch_times
+ON COMMIT DROP
+AS
+SELECT
+  delivery.message_id,
+  delivery.first_fetched_at
+FROM public.mentor_message_deliveries AS delivery
+WHERE delivery.message_id IN (
+  SELECT (message ->> 'id')::uuid
+  FROM cloud_test_results
+  CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(result -> 'messages') AS message
+  WHERE label = 'delivery_first_fetch'
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'delivery_repeat_fetch',
+  public.fetch_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    NULL,
+    100,
+    NULL,
+    NULL
+  )
+);
+
+SELECT ok(
+  (
+    SELECT
+      (
+        SELECT pg_catalog.jsonb_agg(message ->> 'id' ORDER BY message ->> 'id')
+        FROM pg_catalog.jsonb_array_elements(first.result -> 'messages') AS message
+      ) = (
+        SELECT pg_catalog.jsonb_agg(message ->> 'id' ORDER BY message ->> 'id')
+        FROM pg_catalog.jsonb_array_elements(repeated.result -> 'messages') AS message
+      )
+      AND pg_catalog.bool_and(
+        delivery.first_fetched_at = saved.first_fetched_at
+        AND delivery.fetch_count = 2
+      )
+    FROM cloud_test_results AS first
+    JOIN cloud_test_results AS repeated
+      ON repeated.label = 'delivery_repeat_fetch'
+    JOIN cloud_test_first_fetch_times AS saved
+      ON true
+    JOIN public.mentor_message_deliveries AS delivery
+      ON delivery.message_id = saved.message_id
+    WHERE first.label = 'delivery_first_fetch'
+    GROUP BY first.result, repeated.result
+  ),
+  'repeat fetch returns the same unacknowledged messages and preserves first fetch time'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.fetch_workbuddy_mentor_messages(
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'student_two_ingest'
+      )
+    )
+  $test$,
+  'P4041',
+  'workbuddy_session_not_owned',
+  'session filter never accepts another student session'
+);
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'delivery_cursor_first',
+  public.fetch_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    NULL,
+    1,
+    NULL,
+    NULL
+  );
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'delivery_cursor_second',
+  public.fetch_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    NULL,
+    1,
+    (first.result -> 'messages' -> 0 ->> 'created_at')::timestamptz,
+    (first.result -> 'messages' -> 0 ->> 'id')::uuid
+  )
+FROM cloud_test_results AS first
+WHERE first.label = 'delivery_cursor_first';
+
+SELECT ok(
+  (
+    SELECT
+      pg_catalog.jsonb_array_length(first.result -> 'messages') = 1
+      AND pg_catalog.jsonb_array_length(second.result -> 'messages') = 1
+      AND first.result -> 'messages' -> 0 ->> 'created_at'
+        = second.result -> 'messages' -> 0 ->> 'created_at'
+      AND first.result -> 'messages' -> 0 ->> 'id'
+        < second.result -> 'messages' -> 0 ->> 'id'
+    FROM cloud_test_results AS first
+    JOIN cloud_test_results AS second
+      ON second.label = 'delivery_cursor_second'
+    WHERE first.label = 'delivery_cursor_first'
+  ),
+  'composite cursor retains messages that share an identical timestamp'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.ack_workbuddy_mentor_messages(
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      ARRAY[
+        (
+          SELECT (result ->> 'message_id')::uuid
+          FROM cloud_test_results
+          WHERE label = 'student_one_message'
+        ),
+        (
+          SELECT (result ->> 'message_id')::uuid
+          FROM cloud_test_results
+          WHERE label = 'student_two_message'
+        )
+      ]
+    )
+  $test$,
+  'P4040',
+  'workbuddy_delivery_not_owned',
+  'mixed own and foreign acknowledgement IDs fail as one request'
+);
+
+SELECT ok(
+  (
+    SELECT pg_catalog.bool_and(delivery.acknowledged_at IS NULL)
+    FROM public.mentor_message_deliveries AS delivery
+    WHERE delivery.message_id IN (
+      SELECT (result ->> 'message_id')::uuid
+      FROM cloud_test_results
+      WHERE label IN ('student_one_message', 'student_two_message')
+    )
+  ),
+  'mixed acknowledgement failure makes no partial update'
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'delivery_first_ack',
+  public.ack_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    ARRAY[
+      (
+        SELECT (result ->> 'message_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'student_one_message'
+      )
+    ]
+  )
+);
+
+SELECT ok(
+  (
+    SELECT
+      pg_catalog.jsonb_array_length(result -> 'acknowledged') = 1
+      AND result -> 'acknowledged' -> 0 ->> 'acknowledged_at' IS NOT NULL
+    FROM cloud_test_results
+    WHERE label = 'delivery_first_ack'
+  ),
+  'owned message acknowledgement persists and returns its first timestamp'
+);
+
+SELECT is(
+  (
+    SELECT
+      public.ack_workbuddy_mentor_messages(
+        (
+          SELECT id
+          FROM public.students
+          WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+        ),
+        ARRAY[
+          (
+            SELECT (result ->> 'message_id')::uuid
+            FROM cloud_test_results
+            WHERE label = 'student_one_message'
+          )
+        ]
+      ) -> 'acknowledged' -> 0 ->> 'acknowledged_at'
+  ),
+  (
+    SELECT result -> 'acknowledged' -> 0 ->> 'acknowledged_at'
+    FROM cloud_test_results
+    WHERE label = 'delivery_first_ack'
+  ),
+  'repeated acknowledgement is idempotent and preserves the first timestamp'
+);
+
+SELECT is(
+  (
+    SELECT pg_catalog.jsonb_array_length(result -> 'messages')
+    FROM (
+      SELECT public.fetch_workbuddy_mentor_messages(
+        (
+          SELECT id
+          FROM public.students
+          WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+        ),
+        (
+          SELECT session_id
+          FROM public.mentor_message_deliveries
+          WHERE message_id = (
+            SELECT (result ->> 'message_id')::uuid
+            FROM cloud_test_results
+            WHERE label = 'student_one_message'
+          )
+        ),
+        100,
+        NULL,
+        NULL
+      ) AS result
+    ) AS fetched
+  ),
+  1,
+  'fetch excludes acknowledged messages while retaining other pending session messages'
+);
+
+SELECT ok(
+  (
+    SELECT pg_catalog.bool_and(
+      message ->> 'student_id' = student.id::text
+    )
+    FROM (
+      SELECT public.fetch_workbuddy_mentor_messages(
+        (
+          SELECT id
+          FROM public.students
+          WHERE user_id = '10000000-0000-0000-0000-000000000002'::uuid
+        ),
+        NULL,
+        100,
+        NULL,
+        NULL
+      ) AS result
+    ) AS fetched
+    JOIN public.students AS student
+      ON student.user_id = '10000000-0000-0000-0000-000000000002'::uuid
+    CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(
+      fetched.result -> 'messages'
+    ) AS message
+  ),
+  'delivery fetch returns only the credential-owned student rows'
+);
+
+SELECT lives_ok(
+  $test$
+    SELECT public.create_mentor_message(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      pg_catalog.repeat('学', 8000),
+      NULL
+    )
+  $test$,
+  'service mentor creation accepts exactly 8000 Unicode characters'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.create_mentor_message(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      pg_catalog.repeat('学', 8001),
+      NULL
+    )
+  $test$,
+  '22023',
+  'mentor_message_text_length_invalid',
+  'service mentor creation rejects 8001 Unicode characters'
+);
+
+SET LOCAL ROLE authenticated;
+SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000101';
+
+SELECT lives_ok(
+  $test$
+    INSERT INTO public.timeline_items (
+      session_id,
+      kind,
+      text,
+      author_id
+    )
+    VALUES (
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      'mentor',
+      pg_catalog.repeat('导', 8000),
+      '10000000-0000-0000-0000-000000000101'::uuid
+    )
+  $test$,
+  'authenticated mentor insert accepts exactly 8000 Unicode characters'
+);
+
+SELECT throws_ok(
+  $test$
+    INSERT INTO public.timeline_items (
+      session_id,
+      kind,
+      text,
+      author_id
+    )
+    VALUES (
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      ),
+      'mentor',
+      pg_catalog.repeat('导', 8001),
+      '10000000-0000-0000-0000-000000000101'::uuid
+    )
+  $test$,
+  '22023',
+  'mentor_message_text_length_invalid',
+  'authenticated mentor insert rejects 8001 Unicode characters'
+);
+
+RESET ROLE;
 
 SELECT * FROM finish();
 ROLLBACK;

@@ -21,7 +21,9 @@ import { Route as Char91DotmcpChar93ListToolsRouteImport } from './routes/[.mcp]
 import { Route as AuthenticatedAdminMentorsRouteImport } from './routes/_authenticated/admin.mentors'
 import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[.mcp]/invoke-tool/$tool'
 import { Route as DotlovableOauthConsentRouteImport } from './routes/[.]lovable.oauth.consent'
+import { Route as ApiPublicWorkbuddyMentorMessagesRouteImport } from './routes/api/public/workbuddy/mentor-messages'
 import { Route as ApiPublicWorkbuddyIngestRouteImport } from './routes/api/public/workbuddy/ingest'
+import { Route as ApiPublicWorkbuddyMentorMessagesAckRouteImport } from './routes/api/public/workbuddy/mentor-messages/ack'
 
 const McpRoute = McpRouteImport.update({
   id: '/mcp',
@@ -86,11 +88,23 @@ const DotlovableOauthConsentRoute = DotlovableOauthConsentRouteImport.update({
   path: '/.lovable/oauth/consent',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicWorkbuddyMentorMessagesRoute =
+  ApiPublicWorkbuddyMentorMessagesRouteImport.update({
+    id: '/api/public/workbuddy/mentor-messages',
+    path: '/api/public/workbuddy/mentor-messages',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWorkbuddyIngestRoute =
   ApiPublicWorkbuddyIngestRouteImport.update({
     id: '/api/public/workbuddy/ingest',
     path: '/api/public/workbuddy/ingest',
     getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicWorkbuddyMentorMessagesAckRoute =
+  ApiPublicWorkbuddyMentorMessagesAckRouteImport.update({
+    id: '/ack',
+    path: '/ack',
+    getParentRoute: () => ApiPublicWorkbuddyMentorMessagesRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -106,6 +120,8 @@ export interface FileRoutesByFullPath {
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
   '/admin/mentors': typeof AuthenticatedAdminMentorsRoute
   '/api/public/workbuddy/ingest': typeof ApiPublicWorkbuddyIngestRoute
+  '/api/public/workbuddy/mentor-messages': typeof ApiPublicWorkbuddyMentorMessagesRouteWithChildren
+  '/api/public/workbuddy/mentor-messages/ack': typeof ApiPublicWorkbuddyMentorMessagesAckRoute
 }
 export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
@@ -120,6 +136,8 @@ export interface FileRoutesByTo {
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
   '/admin/mentors': typeof AuthenticatedAdminMentorsRoute
   '/api/public/workbuddy/ingest': typeof ApiPublicWorkbuddyIngestRoute
+  '/api/public/workbuddy/mentor-messages': typeof ApiPublicWorkbuddyMentorMessagesRouteWithChildren
+  '/api/public/workbuddy/mentor-messages/ack': typeof ApiPublicWorkbuddyMentorMessagesAckRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -136,6 +154,8 @@ export interface FileRoutesById {
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
   '/_authenticated/admin/mentors': typeof AuthenticatedAdminMentorsRoute
   '/api/public/workbuddy/ingest': typeof ApiPublicWorkbuddyIngestRoute
+  '/api/public/workbuddy/mentor-messages': typeof ApiPublicWorkbuddyMentorMessagesRouteWithChildren
+  '/api/public/workbuddy/mentor-messages/ack': typeof ApiPublicWorkbuddyMentorMessagesAckRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -152,6 +172,8 @@ export interface FileRouteTypes {
     | '/.mcp/invoke-tool/$tool'
     | '/admin/mentors'
     | '/api/public/workbuddy/ingest'
+    | '/api/public/workbuddy/mentor-messages'
+    | '/api/public/workbuddy/mentor-messages/ack'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/auth'
@@ -166,6 +188,8 @@ export interface FileRouteTypes {
     | '/.mcp/invoke-tool/$tool'
     | '/admin/mentors'
     | '/api/public/workbuddy/ingest'
+    | '/api/public/workbuddy/mentor-messages'
+    | '/api/public/workbuddy/mentor-messages/ack'
   id:
     | '__root__'
     | '/_authenticated'
@@ -181,6 +205,8 @@ export interface FileRouteTypes {
     | '/.mcp/invoke-tool/$tool'
     | '/_authenticated/admin/mentors'
     | '/api/public/workbuddy/ingest'
+    | '/api/public/workbuddy/mentor-messages'
+    | '/api/public/workbuddy/mentor-messages/ack'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -194,6 +220,7 @@ export interface RootRouteChildren {
   DotlovableOauthConsentRoute: typeof DotlovableOauthConsentRoute
   Char91DotmcpChar93InvokeToolToolRoute: typeof Char91DotmcpChar93InvokeToolToolRoute
   ApiPublicWorkbuddyIngestRoute: typeof ApiPublicWorkbuddyIngestRoute
+  ApiPublicWorkbuddyMentorMessagesRoute: typeof ApiPublicWorkbuddyMentorMessagesRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -282,12 +309,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DotlovableOauthConsentRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/workbuddy/mentor-messages': {
+      id: '/api/public/workbuddy/mentor-messages'
+      path: '/api/public/workbuddy/mentor-messages'
+      fullPath: '/api/public/workbuddy/mentor-messages'
+      preLoaderRoute: typeof ApiPublicWorkbuddyMentorMessagesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/workbuddy/ingest': {
       id: '/api/public/workbuddy/ingest'
       path: '/api/public/workbuddy/ingest'
       fullPath: '/api/public/workbuddy/ingest'
       preLoaderRoute: typeof ApiPublicWorkbuddyIngestRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/api/public/workbuddy/mentor-messages/ack': {
+      id: '/api/public/workbuddy/mentor-messages/ack'
+      path: '/ack'
+      fullPath: '/api/public/workbuddy/mentor-messages/ack'
+      preLoaderRoute: typeof ApiPublicWorkbuddyMentorMessagesAckRouteImport
+      parentRoute: typeof ApiPublicWorkbuddyMentorMessagesRoute
     }
   }
 }
@@ -307,6 +348,21 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
 const AuthenticatedRouteRouteWithChildren =
   AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
 
+interface ApiPublicWorkbuddyMentorMessagesRouteChildren {
+  ApiPublicWorkbuddyMentorMessagesAckRoute: typeof ApiPublicWorkbuddyMentorMessagesAckRoute
+}
+
+const ApiPublicWorkbuddyMentorMessagesRouteChildren: ApiPublicWorkbuddyMentorMessagesRouteChildren =
+  {
+    ApiPublicWorkbuddyMentorMessagesAckRoute:
+      ApiPublicWorkbuddyMentorMessagesAckRoute,
+  }
+
+const ApiPublicWorkbuddyMentorMessagesRouteWithChildren =
+  ApiPublicWorkbuddyMentorMessagesRoute._addFileChildren(
+    ApiPublicWorkbuddyMentorMessagesRouteChildren,
+  )
+
 const rootRouteChildren: RootRouteChildren = {
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
@@ -319,6 +375,8 @@ const rootRouteChildren: RootRouteChildren = {
   DotlovableOauthConsentRoute: DotlovableOauthConsentRoute,
   Char91DotmcpChar93InvokeToolToolRoute: Char91DotmcpChar93InvokeToolToolRoute,
   ApiPublicWorkbuddyIngestRoute: ApiPublicWorkbuddyIngestRoute,
+  ApiPublicWorkbuddyMentorMessagesRoute:
+    ApiPublicWorkbuddyMentorMessagesRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -24,7 +24,7 @@ Task 3B 的技术方案已经锁定。本次只核对 PostgreSQL/Supabase 的函
 
 ## 迁移与兼容边界
 
-- 认证客户端不再拥有 `students` 的表级 `SELECT`；只授予当前导师列表需要的安全列。学员配置页暂时通过仅返回当前学员记录的 `get_my_legacy_workbuddy_setup()` 读取旧 token，该 RPC 会拒绝 staff 身份，并在 Task 6 与旧列一起删除。
+- Task 5 过渡期撤销了认证客户端对 `students` 的表级 `SELECT`，仅授予导师列表需要的安全列。Task 6 删除临时的 `get_my_legacy_workbuddy_setup()` 与旧明文列后，在既有 RLS 约束下恢复正常表读取，避免破坏学员端和导师端已有查询；凭证改由认证后的 server function 调用 service-role RPC 创建、轮换和撤销。
 - `students` 的 Realtime 订阅也显式使用 `select` 限制为 UI 所需的四列，避免变更流重新暴露未授权字段。
 - 旧 token 以 pgcrypto SHA-256 写入 `workbuddy_credentials`，展示前缀同样从 hash 派生，因此短 token 或带空白 token 不会破坏约束；`source='legacy_token_backfill'` 明确标注过渡来源，重复执行以 token hash 冲突为幂等边界。
 - 已有 mentor/team_admin 只接受 `auth.users.raw_app_meta_data` 中同时存在的 `account_kind='staff'` 与显式 `staff_username`。迁移绝不从邮箱或用户可编辑 metadata 猜用户名。

@@ -72,7 +72,16 @@ reliable endpoint. Because there is no production learner data to migrate,
 existing installations should delete or update the old SKILL and reinstall
 the reliable template from the WorkBuddy setup page.
 
-The setup page no longer reads the deprecated plaintext token RPC. Until Task
-6 provides create/rotate/revoke credential management and one-time credential
-display, the page shows a `<WORKBUDDY_CREDENTIAL>` placeholder and must be
-treated as a format preview rather than an immediately usable installation.
+The setup page now creates, rotates, and revokes a hash-only WorkBuddy
+credential. Plaintext is returned only by the successful create/rotate server
+call and is kept only in the current page's React state. Refreshing, leaving,
+or using the clear action makes it unrecoverable; a new Skill can then be
+installed only by rotating the credential.
+
+The database stores SHA-256, a short display prefix, lifecycle timestamps, and
+at most one active credential per student. `students.workbuddy_token` and the
+temporary plaintext transition RPC were removed before deployment.
+
+Mentor replies are retrieved through the persistent delivery API documented in
+[`workbuddy-delivery.md`](workbuddy-delivery.md). It uses the same bearer
+credential and does not depend on the web process retaining any state.

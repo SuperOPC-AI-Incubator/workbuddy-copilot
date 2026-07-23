@@ -185,7 +185,6 @@ export type Database = {
           last_severity: Database["public"]["Enums"]["severity"];
           updated_at: string;
           user_id: string | null;
-          workbuddy_token: string;
         };
         Insert: {
           created_at?: string;
@@ -195,7 +194,6 @@ export type Database = {
           last_severity?: Database["public"]["Enums"]["severity"];
           updated_at?: string;
           user_id?: string | null;
-          workbuddy_token?: string;
         };
         Update: {
           created_at?: string;
@@ -205,7 +203,6 @@ export type Database = {
           last_severity?: Database["public"]["Enums"]["severity"];
           updated_at?: string;
           user_id?: string | null;
-          workbuddy_token?: string;
         };
         Relationships: [];
       };
@@ -384,6 +381,13 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      ack_workbuddy_mentor_messages: {
+        Args: {
+          _message_ids: string[];
+          _student_id: string;
+        };
+        Returns: Json;
+      };
       bootstrap_staff_account: {
         Args: {
           _auth_identity_version?: number;
@@ -451,8 +455,20 @@ export type Database = {
         };
         Returns: Json;
       };
-      get_my_legacy_workbuddy_setup: {
-        Args: Record<PropertyKey, never>;
+      fetch_workbuddy_mentor_messages: {
+        Args: {
+          _cursor_created_at?: string | null;
+          _cursor_id?: string | null;
+          _limit?: number;
+          _session_id?: string | null;
+          _student_id: string;
+        };
+        Returns: Json;
+      };
+      get_workbuddy_credential_status: {
+        Args: {
+          _user_id: string;
+        };
         Returns: Json;
       };
       has_active_role: {
@@ -478,6 +494,15 @@ export type Database = {
         };
         Returns: Json;
       };
+      issue_workbuddy_credential: {
+        Args: {
+          _rotate?: boolean;
+          _token_hash: string;
+          _token_prefix: string;
+          _user_id: string;
+        };
+        Returns: Json;
+      };
       mark_mentor_messages_web_seen: {
         Args: {
           _message_ids: string[];
@@ -497,6 +522,12 @@ export type Database = {
       resolve_workbuddy_credential: {
         Args: {
           _token_hash: string;
+        };
+        Returns: Json;
+      };
+      revoke_workbuddy_credential: {
+        Args: {
+          _user_id: string;
         };
         Returns: Json;
       };

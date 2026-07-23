@@ -6,6 +6,7 @@ import { Constants, type Database, type Json } from "@/integrations/supabase/typ
 const migrationsDirectory = resolve(process.cwd(), "supabase/migrations");
 const roleMigrationPath = resolve(migrationsDirectory, "20260723090000_add_team_admin_role.sql");
 const cloudMigrationPath = resolve(migrationsDirectory, "20260723090100_cloud_integration.sql");
+const deliveryMigrationPath = resolve(migrationsDirectory, "20260723090300_reliable_delivery.sql");
 const generatedTypesPath = resolve(process.cwd(), "src/integrations/supabase/types.ts");
 const pgTapPath = resolve(process.cwd(), "supabase/tests/cloud_integration_test.sql");
 const concurrencyTestPath = resolve(
@@ -16,6 +17,7 @@ const mentorDeskPath = resolve(process.cwd(), "src/routes/_authenticated/index.t
 
 const roleMigration = readFileSync(roleMigrationPath, "utf8");
 const cloudMigration = readFileSync(cloudMigrationPath, "utf8");
+const deliveryMigration = readFileSync(deliveryMigrationPath, "utf8");
 const generatedTypes = readFileSync(generatedTypesPath, "utf8");
 const pgTap = readFileSync(pgTapPath, "utf8");
 const concurrencyTest = readFileSync(concurrencyTestPath, "utf8");
@@ -442,8 +444,23 @@ describe("cloud integration schema contract", () => {
       };
       Returns: number;
     }>();
-    expectTypeOf<Database["public"]["Functions"]["get_my_legacy_workbuddy_setup"]>().toEqualTypeOf<{
-      Args: Record<PropertyKey, never>;
+    expectTypeOf<
+      Database["public"]["Functions"]["fetch_workbuddy_mentor_messages"]
+    >().toEqualTypeOf<{
+      Args: {
+        _cursor_created_at?: string | null;
+        _cursor_id?: string | null;
+        _limit?: number;
+        _session_id?: string | null;
+        _student_id: string;
+      };
+      Returns: Json;
+    }>();
+    expectTypeOf<Database["public"]["Functions"]["ack_workbuddy_mentor_messages"]>().toEqualTypeOf<{
+      Args: {
+        _message_ids: string[];
+        _student_id: string;
+      };
       Returns: Json;
     }>();
     expectTypeOf<
@@ -970,7 +987,7 @@ describe("cloud integration schema contract", () => {
     );
   });
 
-  test("removes plaintext token visibility while retaining an own-student transition RPC", () => {
+  test("removes the temporary plaintext transition after callers migrate", () => {
     expect(cloudMigration).toMatch(
       /REVOKE\s+SELECT\s*,\s*INSERT\s*,\s*UPDATE\s*,\s*DELETE\s+ON\s+TABLE\s+public\.students\s+FROM\s+authenticated/i,
     );
@@ -981,16 +998,14 @@ describe("cloud integration schema contract", () => {
       /GRANT\s+SELECT\s*\([^)]*\bworkbuddy_token\b[^)]*\)\s+ON\s+public\.students\s+TO\s+authenticated/i,
     );
 
-    const legacySetup = functionDefinition(cloudMigration, "get_my_legacy_workbuddy_setup");
-    expect(legacySetup).toMatch(/\bSECURITY\s+DEFINER\b/i);
-    expect(legacySetup).toMatch(/\bWHERE\s+student\.user_id\s*=\s*auth\.uid\s*\(\s*\)/i);
-    expect(legacySetup).toMatch(/\bstudent\.workbuddy_token\b/i);
-    expect(legacySetup).toMatch(
-      /\bOR\s+EXISTS[\s\S]*?public\.staff_accounts[\s\S]*?MESSAGE\s*=\s*'student_identity_required'/i,
+    expect(deliveryMigration).toMatch(
+      /DROP\s+FUNCTION\s+IF\s+EXISTS\s+public\.get_my_legacy_workbuddy_setup\s*\(\s*\)/i,
     );
-    expect(cloudMigration).toMatch(
-      /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.get_my_legacy_workbuddy_setup\s*\(\s*\)\s+TO\s+authenticated/i,
+    expect(deliveryMigration).toMatch(
+      /ALTER\s+TABLE\s+public\.students[\s\S]*?DROP\s+COLUMN\s+IF\s+EXISTS\s+workbuddy_token/i,
     );
+    expect(generatedTypes).not.toMatch(/\bworkbuddy_token\b/i);
+    expect(generatedTypes).not.toMatch(/\bget_my_legacy_workbuddy_setup\b/i);
   });
 
   test("stages existing staff only from trusted explicit metadata then aborts unresolved roles", () => {
@@ -1069,16 +1084,19 @@ describe("cloud integration schema contract", () => {
     expect(pgTap).toMatch(/active staff direct insert updates session and student aggregates/i);
     expect(pgTap).toMatch(/mentor delivery rejects a non-mentor timeline item/i);
     expect(pgTap).toMatch(/delivered mentor timeline kind is immutable/i);
-    expect(pgTap).toMatch(/short or whitespace legacy tokens backfill through a hash prefix/i);
+    expect(pgTap).toMatch(/removes the legacy plaintext student credential column/i);
+    expect(pgTap).toMatch(/composite cursor retains messages that share an identical timestamp/i);
+    expect(pgTap).toMatch(/mixed acknowledgement failure makes no partial update/i);
     expect(pgTap).toMatch(/event rejects a session owned by another student/i);
     expect(pgTap).toMatch(/timeline rejects a session that differs from its event/i);
     expect(pgTap).toMatch(/delivery rejects a mismatched session or student/i);
-    expect(pgTap).toMatch(/authenticated staff cannot select plaintext WorkBuddy tokens/i);
+    expect(pgTap).toMatch(/delivery identity columns are immutable/i);
+    expect(pgTap).toMatch(/authenticated browsers cannot read credential status directly/i);
   });
 
   test("defines an explicit-env two-client concurrency integration test", () => {
     expect(concurrencyTest).toMatch(/createClient<Database>/);
-    expect(concurrencyTest.match(/createClient<Database>/g)).toHaveLength(2);
+    expect(concurrencyTest.match(/createClient<Database>/g)).toHaveLength(8);
     expect(concurrencyTest).toMatch(/Promise\.all\s*\(/);
     expect(concurrencyTest).toMatch(/CONCURRENCY_ROUNDS\s*=\s*[3-9]/);
     expect(concurrencyTest).toMatch(/launchTogether/);
@@ -1091,6 +1109,15 @@ describe("cloud integration schema contract", () => {
     expect(concurrencyTest).toMatch(/skipIf\s*\(/);
     expect(concurrencyTest).toMatch(/duplicate/);
     expect(concurrencyTest).toMatch(/P4090/);
+    expect(concurrencyTest).toMatch(/issue_workbuddy_credential/);
+    expect(concurrencyTest).toMatch(/workbuddy_credentials/);
+    expect(concurrencyTest).toMatch(/active\.count\)\.toBe\(1\)/);
+    expect(concurrencyTest).toMatch(/fetch_workbuddy_mentor_messages/);
+    expect(concurrencyTest).toMatch(/ack_workbuddy_mentor_messages/);
+    expect(concurrencyTest).toMatch(/Earlier created_at, higher UUID/);
+    expect(concurrencyTest).toMatch(/Later created_at, lower UUID/);
+    expect(concurrencyTest).toMatch(/fetch racing a timeline cascade delete/);
+    expect(concurrencyTest).toMatch(/from\("timeline_items"\)\.delete\(\)\.eq\("id", messageId\)/);
   });
 
   test("restricts student realtime payloads to the four UI fields", () => {
@@ -1111,7 +1138,11 @@ describe("cloud integration schema contract", () => {
       "ingest_workbuddy_turn",
       "create_mentor_message",
       "mark_mentor_messages_web_seen",
-      "get_my_legacy_workbuddy_setup",
+      "fetch_workbuddy_mentor_messages",
+      "ack_workbuddy_mentor_messages",
+      "get_workbuddy_credential_status",
+      "issue_workbuddy_credential",
+      "revoke_workbuddy_credential",
     ]) {
       expect(generatedTypes).toMatch(new RegExp(`\\b${functionName}:\\s*\\{`, "i"));
     }
@@ -1134,10 +1165,14 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*82\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*109\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);
+    expect(pgTap).toMatch(/service mentor creation accepts exactly 8000 Unicode characters/i);
+    expect(pgTap).toMatch(/authenticated mentor insert rejects 8001 Unicode characters/i);
+    expect(pgTap).toMatch(/service role cannot insert delivery rows directly/i);
+    expect(pgTap).toMatch(/service role cannot update delivery rows directly/i);
     expect(pgTap).toMatch(/rejects unsupported auth identity versions/i);
     expect(pgTap).toMatch(/authenticated browser cannot complete a staff password change/i);
     expect(pgTap).toMatch(/password completion updates only the explicit active staff row/i);

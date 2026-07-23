@@ -47,7 +47,9 @@ describe("WorkBuddy SKILL generator", () => {
   test("setup page no longer reads or renders the legacy plaintext token", () => {
     expect(setupRoute).toMatch(/buildWorkbuddySkill/);
     expect(setupRoute).toMatch(/重新安装|更新旧版/);
-    expect(setupRoute).toMatch(/接入凭证[\s\S]*?一次性生成/);
+    expect(setupRoute).toMatch(/接入凭证[\s\S]*?仅显示这一次/);
+    expect(setupRoute).toMatch(/createWorkbuddyCredential/);
+    expect(setupRoute).toMatch(/rotateWorkbuddyCredential/);
     expect(setupRoute).not.toMatch(/get_my_legacy_workbuddy_setup/);
     expect(setupRoute).not.toMatch(/workbuddy_token/);
     expect(setupRoute).not.toMatch(/superbrain-copilot\.lovable\.app/);

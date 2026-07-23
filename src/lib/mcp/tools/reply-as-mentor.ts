@@ -1,5 +1,6 @@
 import { defineTool } from "@lovable.dev/mcp-js";
 import { z } from "zod";
+import { isMentorMessageWithinLimit } from "@/lib/workbuddy/mentor-message-contract";
 import { supabaseForUser, unauth } from "./_supabase";
 
 export default defineTool({
@@ -9,7 +10,7 @@ export default defineTool({
     "导师专用: 向指定学员会话的 timeline 中插入一条 mentor 消息。RLS 要求调用者具备 mentor 角色。",
   inputSchema: {
     session_id: z.string().uuid(),
-    text: z.string().min(1).max(8000),
+    text: z.string().min(1).refine(isMentorMessageWithinLimit),
     tag: z.string().max(60).optional(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
