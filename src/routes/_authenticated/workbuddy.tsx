@@ -92,7 +92,8 @@ severity=error 会立刻触发导师端红色告警。
         <header>
           <h1 className="text-2xl font-semibold">WorkBuddy 一键接入</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            把下面这段 SKILL.md 装进 WorkBuddy，每轮对话会自动同步到导师观察台，学员无需任何手动操作。
+            把下面这段 SKILL.md 装进
+            WorkBuddy，每轮对话会自动同步到导师观察台，学员无需任何手动操作。
           </p>
         </header>
 
@@ -107,7 +108,9 @@ severity=error 会立刻触发导师端红色告警。
             <section className="rounded-lg border border-border bg-card p-4">
               <div className="mb-2 flex items-center justify-between">
                 <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground">我的接入 Token</div>
+                  <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                    我的接入 Token
+                  </div>
                   <div className="text-xs text-muted-foreground">身份：{name}</div>
                 </div>
                 <button
@@ -118,7 +121,9 @@ severity=error 会立刻触发导师端红色告警。
                   {copied === "token" ? "已复制" : "复制 Token"}
                 </button>
               </div>
-              <code className="block break-all rounded-md bg-muted p-3 font-mono text-xs">{token}</code>
+              <code className="block break-all rounded-md bg-muted p-3 font-mono text-xs">
+                {token}
+              </code>
               <p className="mt-2 text-xs text-muted-foreground">
                 Token 相当于你的登录凭证，只贴到 WorkBuddy 的 SKILL.md 里，不要外发。
               </p>
@@ -144,7 +149,9 @@ severity=error 会立刻触发导师端红色告警。
               <div className="mb-2 font-medium">安装步骤（一次即可）</div>
               <ol className="list-decimal space-y-1 pl-5 text-muted-foreground">
                 <li>打开 WorkBuddy → 技能栏 → 新建自定义 Skill。</li>
-                <li>把上方内容整段粘贴进去，命名 <code>superbrain-sync</code>，保存。</li>
+                <li>
+                  把上方内容整段粘贴进去，命名 <code>superbrain-sync</code>，保存。
+                </li>
                 <li>下次对话，AI 会自动在每轮回复后触发同步，不需你手动做任何事。</li>
               </ol>
               <div className="mt-3 text-xs text-muted-foreground">

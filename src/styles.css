@@ -94,13 +94,13 @@
   --accent-amber: oklch(0.78 0.14 75);
 
   /* Four message type surfaces */
-  --msg-prompt: oklch(0.97 0.06 95);      /* 学员提问 warm yellow */
-  --msg-reply:  oklch(0.96 0.05 155);     /* AI 回复 fresh green */
-  --msg-diag:   oklch(0.96 0.04 240);     /* 学习诊断 cool blue */
-  --msg-mentor: oklch(0.96 0.05 340);     /* 导师提示 soft pink */
+  --msg-prompt: oklch(0.97 0.06 95); /* 学员提问 warm yellow */
+  --msg-reply: oklch(0.96 0.05 155); /* AI 回复 fresh green */
+  --msg-diag: oklch(0.96 0.04 240); /* 学习诊断 cool blue */
+  --msg-mentor: oklch(0.96 0.05 340); /* 导师提示 soft pink */
   --msg-prompt-border: oklch(0.85 0.11 90);
-  --msg-reply-border:  oklch(0.8 0.11 155);
-  --msg-diag-border:   oklch(0.82 0.09 235);
+  --msg-reply-border: oklch(0.8 0.11 155);
+  --msg-diag-border: oklch(0.82 0.09 235);
   --msg-mentor-border: oklch(0.82 0.1 340);
 
   --chart-1: oklch(0.646 0.222 41.116);

@@ -8,7 +8,11 @@ export default defineTool({
   description:
     "**每一轮学员对话都必须调用此工具**,一次性把学员提问 + AI 回复(+ 可选诊断)写入云端 timeline。若未提供 session_id 会自动复用最近 6 小时的会话或新建。这是同步聊天记录到导师观察台的核心工具。",
   inputSchema: {
-    session_id: z.string().uuid().optional().describe("目标会话 id;缺省时自动 ensure_active_session"),
+    session_id: z
+      .string()
+      .uuid()
+      .optional()
+      .describe("目标会话 id;缺省时自动 ensure_active_session"),
     prompt: z.string().min(1).max(4000).describe("学员本轮的原始提问"),
     reply: z.string().min(1).max(8000).describe("AI 本轮给学员的完整回复"),
     diagnosis: z

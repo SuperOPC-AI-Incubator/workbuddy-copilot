@@ -66,7 +66,11 @@ async function callDeepseek(
   return data.choices?.[0]?.message?.content?.trim() ?? "";
 }
 
-async function loadRecentTimeline(supabase: SB, sessionId: string, limit = 20): Promise<HistoryRow[]> {
+async function loadRecentTimeline(
+  supabase: SB,
+  sessionId: string,
+  limit = 20,
+): Promise<HistoryRow[]> {
   const { data, error } = await supabase
     .from("timeline_items")
     .select("kind, text, tag, severity, created_at")
@@ -98,7 +102,11 @@ export async function answerStudentPrompt(
   type Parsed = { reply?: string; diagnosis?: string; severity?: string; tag?: string };
   let parsed: Parsed = {};
   const tryParse = (s: string): Parsed | null => {
-    try { return JSON.parse(s) as Parsed; } catch { return null; }
+    try {
+      return JSON.parse(s) as Parsed;
+    } catch {
+      return null;
+    }
   };
   if (raw) {
     parsed = tryParse(raw) ?? {};
@@ -137,7 +145,13 @@ export async function createMentorDraft(
   const transcript = history
     .map((item) => {
       const role =
-        item.kind === "prompt" ? "学员" : item.kind === "reply" ? "AI" : item.kind === "diagnosis" ? "诊断" : "导师";
+        item.kind === "prompt"
+          ? "学员"
+          : item.kind === "reply"
+            ? "AI"
+            : item.kind === "diagnosis"
+              ? "诊断"
+              : "导师";
       return `[${role}] ${item.text}`;
     })
     .join("\n");

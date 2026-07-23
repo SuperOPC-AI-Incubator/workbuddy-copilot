@@ -9,7 +9,10 @@ export function supabaseForUser(ctx: ToolContext) {
 }
 
 export function unauth() {
-  return { content: [{ type: "text" as const, text: "未登录 / Not authenticated" }], isError: true };
+  return {
+    content: [{ type: "text" as const, text: "未登录 / Not authenticated" }],
+    isError: true,
+  };
 }
 
 export async function getMyStudent(ctx: ToolContext) {

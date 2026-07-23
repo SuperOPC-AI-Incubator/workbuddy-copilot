@@ -80,8 +80,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { title: "WorkBuddy Copilot · 导师观察台" },
       {
         name: "description",
-        content:
-          "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
+        content: "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
       },
       { name: "author", content: "WorkBuddy" },
       { property: "og:title", content: "WorkBuddy Copilot · 导师观察台" },
@@ -92,9 +91,20 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:title", content: "WorkBuddy Copilot · 导师观察台" },
-      { name: "twitter:description", content: "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。" },
-      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/3c733263-9f14-4a77-b7a1-696450db69f0/id-preview-b0de2ca2--2d96721b-7dbe-4995-a6e3-6ca029260fd4.lovable.app-1783994885375.png" },
-      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/3c733263-9f14-4a77-b7a1-696450db69f0/id-preview-b0de2ca2--2d96721b-7dbe-4995-a6e3-6ca029260fd4.lovable.app-1783994885375.png" },
+      {
+        name: "twitter:description",
+        content: "面向 PLC 学习场景的实时导师观察台：查看学员状态、对话时间线、发送定向学习提示。",
+      },
+      {
+        property: "og:image",
+        content:
+          "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/3c733263-9f14-4a77-b7a1-696450db69f0/id-preview-b0de2ca2--2d96721b-7dbe-4995-a6e3-6ca029260fd4.lovable.app-1783994885375.png",
+      },
+      {
+        name: "twitter:image",
+        content:
+          "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/3c733263-9f14-4a77-b7a1-696450db69f0/id-preview-b0de2ca2--2d96721b-7dbe-4995-a6e3-6ca029260fd4.lovable.app-1783994885375.png",
+      },
     ],
     links: [
       {

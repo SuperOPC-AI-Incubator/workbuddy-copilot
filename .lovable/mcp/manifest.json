@@ -5,9 +5,7 @@
   "auth": {
     "type": "oauth",
     "issuer": "https://bnuofecykdoukjjnqbgx.supabase.co/auth/v1",
-    "accepted_audiences": [
-      "authenticated"
-    ]
+    "accepted_audiences": ["authenticated"]
   },
   "mcp": {
     "server": {
@@ -58,17 +56,10 @@
                 },
                 "severity": {
                   "type": "string",
-                  "enum": [
-                    "ok",
-                    "warn",
-                    "error"
-                  ]
+                  "enum": ["ok", "warn", "error"]
                 }
               },
-              "required": [
-                "text",
-                "severity"
-              ]
+              "required": ["text", "severity"]
             },
             "tag": {
               "description": "可选标签,例如 'PLC/联锁'",
@@ -76,10 +67,7 @@
               "maxLength": 60
             }
           },
-          "required": [
-            "prompt",
-            "reply"
-          ]
+          "required": ["prompt", "reply"]
         },
         "outputSchema": null
       },
@@ -129,15 +117,10 @@
             "group": {
               "description": "会话分组: task=任务对话, space=空间/长期主题; 默认 task",
               "type": "string",
-              "enum": [
-                "task",
-                "space"
-              ]
+              "enum": ["task", "space"]
             }
           },
-          "required": [
-            "title"
-          ]
+          "required": ["title"]
         },
         "outputSchema": null
       },
@@ -196,10 +179,7 @@
               "maxLength": 60
             }
           },
-          "required": [
-            "session_id",
-            "text"
-          ]
+          "required": ["session_id", "text"]
         },
         "outputSchema": null
       },
@@ -232,10 +212,7 @@
               "maxLength": 60
             }
           },
-          "required": [
-            "session_id",
-            "text"
-          ]
+          "required": ["session_id", "text"]
         },
         "outputSchema": null
       },
@@ -264,11 +241,7 @@
             },
             "severity": {
               "type": "string",
-              "enum": [
-                "ok",
-                "warn",
-                "error"
-              ],
+              "enum": ["ok", "warn", "error"],
               "description": "严重度: ok=已理解/正常, warn=需要关注, error=需要导师介入"
             },
             "tag": {
@@ -276,11 +249,7 @@
               "maxLength": 60
             }
           },
-          "required": [
-            "session_id",
-            "text",
-            "severity"
-          ]
+          "required": ["session_id", "text", "severity"]
         },
         "outputSchema": null
       },
@@ -309,10 +278,7 @@
               "description": "呼叫原因简述,例如 '联锁逻辑始终不触发,请求排查'"
             }
           },
-          "required": [
-            "session_id",
-            "reason"
-          ]
+          "required": ["session_id", "reason"]
         },
         "outputSchema": null
       },
@@ -360,9 +326,7 @@
               "maximum": 200
             }
           },
-          "required": [
-            "student_id"
-          ]
+          "required": ["student_id"]
         },
         "outputSchema": null
       },
@@ -389,9 +353,7 @@
               "maximum": 500
             }
           },
-          "required": [
-            "session_id"
-          ]
+          "required": ["session_id"]
         },
         "outputSchema": null
       },
@@ -423,10 +385,7 @@
               "maxLength": 60
             }
           },
-          "required": [
-            "session_id",
-            "text"
-          ]
+          "required": ["session_id", "text"]
         },
         "outputSchema": null
       }

@@ -62,9 +62,7 @@ function MentorDesk() {
   const STALE_MS = 24 * 60 * 60 * 1000;
   const staleStudents = useMemo(() => {
     if (role !== "mentor") return [] as Student[];
-    return students.filter(
-      (s) => now - new Date(s.last_active_at).getTime() > STALE_MS,
-    );
+    return students.filter((s) => now - new Date(s.last_active_at).getTime() > STALE_MS);
   }, [role, students, now, STALE_MS]);
   const isStale = (s: Student) =>
     role === "mentor" && now - new Date(s.last_active_at).getTime() > STALE_MS;
@@ -96,7 +94,11 @@ function MentorDesk() {
   const [alerts, setAlerts] = useState<MentorAlert[]>([]);
   useEffect(() => {
     if (role !== "mentor") return;
-    if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+    if (
+      typeof window !== "undefined" &&
+      "Notification" in window &&
+      Notification.permission === "default"
+    ) {
       Notification.requestPermission().catch(() => {});
     }
     const ch = supabase
@@ -121,12 +123,23 @@ function MentorDesk() {
             .single();
           const studentId = (sess as { student_id?: string } | null)?.student_id ?? "";
           const studentName =
-            (sess as { students?: { display_name?: string } } | null)?.students?.display_name ?? "学员";
+            (sess as { students?: { display_name?: string } } | null)?.students?.display_name ??
+            "学员";
           const alertId = row.id;
-          setAlerts((prev) => [
-            { id: alertId, kind, fromWorkBuddy, studentName, text: row.text, sessionId: row.session_id, studentId },
-            ...prev,
-          ].slice(0, 5));
+          setAlerts((prev) =>
+            [
+              {
+                id: alertId,
+                kind,
+                fromWorkBuddy,
+                studentName,
+                text: row.text,
+                sessionId: row.session_id,
+                studentId,
+              },
+              ...prev,
+            ].slice(0, 5),
+          );
           // Warn: soft toast, auto-dismiss, no sound / notification / title flash.
           if (kind === "warn") {
             window.setTimeout(() => {
@@ -137,9 +150,14 @@ function MentorDesk() {
           // Sound (sos = double chime, error = single).
           try {
             const AudioCtx =
-              (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext })
-                .AudioContext ??
-              (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+              (
+                window as unknown as {
+                  AudioContext?: typeof AudioContext;
+                  webkitAudioContext?: typeof AudioContext;
+                }
+              ).AudioContext ??
+              (window as unknown as { webkitAudioContext?: typeof AudioContext })
+                .webkitAudioContext;
             if (AudioCtx) {
               const ctx = new AudioCtx();
               const play = (freq: number, start: number, dur = 0.18) => {
@@ -165,11 +183,13 @@ function MentorDesk() {
             /* noop */
           }
           const title =
-            kind === "sos"
-              ? `🆘 ${studentName} 呼叫导师`
-              : `⚠️ ${studentName} 需导师介入`;
+            kind === "sos" ? `🆘 ${studentName} 呼叫导师` : `⚠️ ${studentName} 需导师介入`;
           // Browser Notification
-          if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          if (
+            typeof window !== "undefined" &&
+            "Notification" in window &&
+            Notification.permission === "granted"
+          ) {
             try {
               const n = new Notification(title, {
                 body: row.text,
@@ -191,7 +211,8 @@ function MentorDesk() {
           const original = document.title;
           let toggle = false;
           const iv = window.setInterval(() => {
-            document.title = (toggle = !toggle) ? `🆘 ${studentName} 呼叫中…` : original;
+            toggle = !toggle;
+            document.title = toggle ? `🆘 ${studentName} 呼叫中…` : original;
           }, 1000);
           window.setTimeout(() => {
             window.clearInterval(iv);
@@ -227,15 +248,15 @@ function MentorDesk() {
 
     const ch = supabase
       .channel("students-rt")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "students" },
-        (payload) => {
-          setStudents((prev) => applyChange(prev, payload, (a, b) =>
-            new Date(b.last_active_at).getTime() - new Date(a.last_active_at).getTime(),
-          ));
-        },
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "students" }, (payload) => {
+        setStudents((prev) =>
+          applyChange(
+            prev,
+            payload,
+            (a, b) => new Date(b.last_active_at).getTime() - new Date(a.last_active_at).getTime(),
+          ),
+        );
+      })
       .subscribe((status) => setWsConnected(status === "SUBSCRIBED"));
     return () => {
       mounted = false;
@@ -276,8 +297,10 @@ function MentorDesk() {
         },
         (payload) => {
           setSessions((prev) =>
-            applyChange(prev, payload, (a, b) =>
-              new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
+            applyChange(
+              prev,
+              payload,
+              (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
             ),
           );
         },
@@ -319,8 +342,10 @@ function MentorDesk() {
         },
         (payload) => {
           setTimeline((prev) =>
-            applyChange(prev, payload, (a, b) =>
-              new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+            applyChange(
+              prev,
+              payload,
+              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
             ),
           );
         },
@@ -392,9 +417,7 @@ function MentorDesk() {
   const callMentor = async () => {
     if (role !== "student" || !currentSessionId || aiBusy) return;
     const note = window.prompt("向导师说明一下情况（可留空）：", "") ?? "";
-    const text = note.trim()
-      ? `🆘 呼叫导师：${note.trim()}`
-      : "🆘 学员请求导师协助";
+    const text = note.trim() ? `🆘 呼叫导师：${note.trim()}` : "🆘 学员请求导师协助";
     const { data: userRes } = await supabase.auth.getUser();
     const { error } = await supabase.from("timeline_items").insert({
       session_id: currentSessionId,
@@ -425,7 +448,7 @@ function MentorDesk() {
 
   const signOut = async () => {
     await supabase.auth.signOut();
-    navigate({ to: "/auth", replace: true });
+    navigate({ to: "/auth", search: { next: undefined }, replace: true });
   };
 
   return (
@@ -470,10 +493,22 @@ function MentorDesk() {
           {alerts.map((a) => {
             const style =
               a.kind === "sos"
-                ? { box: "border-red-500/40 bg-red-600 text-white", chip: "bg-white/20", title: `🆘 ${a.studentName} 呼叫导师` }
+                ? {
+                    box: "border-red-500/40 bg-red-600 text-white",
+                    chip: "bg-white/20",
+                    title: `🆘 ${a.studentName} 呼叫导师`,
+                  }
                 : a.kind === "error"
-                  ? { box: "border-red-500/40 bg-red-600/95 text-white", chip: "bg-white/20", title: `⚠️ ${a.studentName} 需导师介入` }
-                  : { box: "border-amber-500/40 bg-amber-500 text-white", chip: "bg-white/25", title: `⚠️ ${a.studentName} 需关注` };
+                  ? {
+                      box: "border-red-500/40 bg-red-600/95 text-white",
+                      chip: "bg-white/20",
+                      title: `⚠️ ${a.studentName} 需导师介入`,
+                    }
+                  : {
+                      box: "border-amber-500/40 bg-amber-500 text-white",
+                      chip: "bg-white/25",
+                      title: `⚠️ ${a.studentName} 需关注`,
+                    };
             return (
               <div
                 key={a.id}
@@ -484,7 +519,9 @@ function MentorDesk() {
                     <div className="flex items-center gap-1.5 text-sm font-semibold">
                       <span>{style.title}</span>
                       {a.fromWorkBuddy && (
-                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${style.chip}`}>
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${style.chip}`}
+                        >
                           WorkBuddy
                         </span>
                       )}
@@ -711,17 +748,17 @@ function StudentPanel({
                     {stale && (
                       <span
                         className="shrink-0 rounded px-1 py-0.5 text-[9px] font-medium"
-                        style={{ background: "oklch(0.75 0.15 70 / 0.3)", color: "oklch(0.95 0.08 80)" }}
+                        style={{
+                          background: "oklch(0.75 0.15 70 / 0.3)",
+                          color: "oklch(0.95 0.08 80)",
+                        }}
                         title="24 小时未同步"
                       >
                         ⏰
                       </span>
                     )}
                   </span>
-                  <span
-                    className="truncate text-[11px]"
-                    style={{ color: "var(--sidebar-muted)" }}
-                  >
+                  <span className="truncate text-[11px]" style={{ color: "var(--sidebar-muted)" }}>
                     {timeAgo(toEpoch(s.last_active_at))}
                   </span>
                 </div>
@@ -1014,24 +1051,14 @@ function TimelineCard({ item }: { item: TimelineItem }) {
           </div>
           <time className="text-muted-foreground">{formatTime(ts)}</time>
         </header>
-        <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-          {item.text}
-        </p>
+        <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{item.text}</p>
       </article>
     </li>
   );
 }
 
 /* ─── Bits ──────────────────────────────────────────────── */
-function PanelHeader({
-  title,
-  count,
-  dark,
-}: {
-  title: string;
-  count?: number;
-  dark?: boolean;
-}) {
+function PanelHeader({ title, count, dark }: { title: string; count?: number; dark?: boolean }) {
   return (
     <div
       className="flex h-11 shrink-0 items-center justify-between border-b px-4 text-xs font-semibold uppercase tracking-wider"

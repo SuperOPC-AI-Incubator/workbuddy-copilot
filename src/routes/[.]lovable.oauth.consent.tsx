@@ -10,9 +10,15 @@ type OAuthAuthDetails = {
   redirect_to?: string;
 };
 type OAuthApi = {
-  getAuthorizationDetails: (id: string) => Promise<{ data: OAuthAuthDetails | null; error: Error | null }>;
-  approveAuthorization: (id: string) => Promise<{ data: OAuthAuthDetails | null; error: Error | null }>;
-  denyAuthorization: (id: string) => Promise<{ data: OAuthAuthDetails | null; error: Error | null }>;
+  getAuthorizationDetails: (
+    id: string,
+  ) => Promise<{ data: OAuthAuthDetails | null; error: Error | null }>;
+  approveAuthorization: (
+    id: string,
+  ) => Promise<{ data: OAuthAuthDetails | null; error: Error | null }>;
+  denyAuthorization: (
+    id: string,
+  ) => Promise<{ data: OAuthAuthDetails | null; error: Error | null }>;
 };
 function oauthApi(): OAuthApi {
   return (supabase.auth as unknown as { oauth: OAuthApi }).oauth;
@@ -101,7 +107,8 @@ function Consent() {
       <div className="rounded-xl border bg-card p-8 shadow-sm">
         <h1 className="text-lg font-semibold">授权 {clientName} 连接你的账号</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          {clientName} 将以你的身份读取和写入 WorkBuddy Copilot 的会话与 timeline 数据(仅限你自己的数据,行级权限自动生效)。
+          {clientName} 将以你的身份读取和写入 WorkBuddy Copilot 的会话与 timeline
+          数据(仅限你自己的数据,行级权限自动生效)。
         </p>
         <ul className="mt-4 space-y-1 text-xs text-muted-foreground">
           <li>• 创建 / 读取你的学习会话</li>
@@ -109,7 +116,10 @@ function Consent() {
           <li>• 呼叫导师</li>
         </ul>
         {error && (
-          <p className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive" role="alert">
+          <p
+            className="mt-4 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+            role="alert"
+          >
             {error}
           </p>
         )}

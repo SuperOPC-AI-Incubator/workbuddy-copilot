@@ -5,9 +5,7 @@ export type Severity = "ok" | "warn" | "error";
 export type TimelineKind = "prompt" | "reply" | "diagnosis" | "mentor";
 
 export function formatTime(ts: number | string): string {
-  const ms = typeof ts === "string"
-    ? new Date(ts).getTime()
-    : ts > 1e12 ? ts : ts * 1000;
+  const ms = typeof ts === "string" ? new Date(ts).getTime() : ts > 1e12 ? ts : ts * 1000;
   return new Date(ms).toLocaleString("zh-CN", {
     month: "short",
     day: "numeric",
@@ -17,9 +15,12 @@ export function formatTime(ts: number | string): string {
 }
 
 export function timeAgo(ts: number | string): string {
-  const sec = typeof ts === "string"
-    ? Math.floor(new Date(ts).getTime() / 1000)
-    : ts > 1e12 ? Math.floor(ts / 1000) : ts;
+  const sec =
+    typeof ts === "string"
+      ? Math.floor(new Date(ts).getTime() / 1000)
+      : ts > 1e12
+        ? Math.floor(ts / 1000)
+        : ts;
   const diff = Math.max(1, Math.floor(Date.now() / 1000 - sec));
   if (diff < 60) return `${diff} 秒前`;
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;

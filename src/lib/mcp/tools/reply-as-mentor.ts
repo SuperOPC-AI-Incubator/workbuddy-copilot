@@ -5,7 +5,8 @@ import { supabaseForUser, unauth } from "./_supabase";
 export default defineTool({
   name: "reply_as_mentor",
   title: "导师回复学员 / Reply as mentor",
-  description: "导师专用: 向指定学员会话的 timeline 中插入一条 mentor 消息。RLS 要求调用者具备 mentor 角色。",
+  description:
+    "导师专用: 向指定学员会话的 timeline 中插入一条 mentor 消息。RLS 要求调用者具备 mentor 角色。",
   inputSchema: {
     session_id: z.string().uuid(),
     text: z.string().min(1).max(8000),

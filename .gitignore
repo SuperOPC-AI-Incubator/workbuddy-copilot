@@ -16,6 +16,12 @@ dist-ssr
 .nitro
 *.local
 
+# Test and coverage reports
+coverage/
+test-results/
+playwright-report/
+blob-report/
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

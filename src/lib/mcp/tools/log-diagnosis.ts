@@ -10,7 +10,9 @@ export default defineTool({
   inputSchema: {
     session_id: z.string().uuid(),
     text: z.string().min(1).max(4000),
-    severity: z.enum(["ok", "warn", "error"]).describe("严重度: ok=已理解/正常, warn=需要关注, error=需要导师介入"),
+    severity: z
+      .enum(["ok", "warn", "error"])
+      .describe("严重度: ok=已理解/正常, warn=需要关注, error=需要导师介入"),
     tag: z.string().max(60).optional(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },

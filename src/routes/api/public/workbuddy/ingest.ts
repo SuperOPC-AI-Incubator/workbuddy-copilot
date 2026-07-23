@@ -24,16 +24,20 @@ const ItemSchema = z.object({
 });
 
 const PayloadSchema = z.object({
-  student: z.object({
-    user_id: z.string().uuid().optional(),
-    email: z.string().email().optional(),
-    display_name: z.string().min(1).max(80).optional(),
-  }).optional(),
-  session: z.object({
-    id: z.string().uuid().optional(),
-    title: z.string().min(1).max(120).optional(),
-    group: z.enum(["space", "task"]).optional(),
-  }).optional(),
+  student: z
+    .object({
+      user_id: z.string().uuid().optional(),
+      email: z.string().email().optional(),
+      display_name: z.string().min(1).max(80).optional(),
+    })
+    .optional(),
+  session: z
+    .object({
+      id: z.string().uuid().optional(),
+      title: z.string().min(1).max(120).optional(),
+      group: z.enum(["space", "task"]).optional(),
+    })
+    .optional(),
   items: z.array(ItemSchema).min(1).max(50),
 });
 
@@ -69,7 +73,10 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
         if (!bearer && !hasSig) {
           return json({ error: "Missing Authorization bearer or X-Workbuddy-Signature" }, 401);
         }
-        if (!bearer && !verifySignature(raw, request.headers.get("x-workbuddy-signature"), secret)) {
+        if (
+          !bearer &&
+          !verifySignature(raw, request.headers.get("x-workbuddy-signature"), secret)
+        ) {
           return json({ error: "Invalid signature" }, 401);
         }
 
@@ -87,7 +94,10 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
         let authorId: string | null = null;
         if (bearer) {
           const { data } = await supabaseAdmin
-            .from("students").select("id, user_id").eq("workbuddy_token", bearer).maybeSingle();
+            .from("students")
+            .select("id, user_id")
+            .eq("workbuddy_token", bearer)
+            .maybeSingle();
           if (!data) return json({ error: "Invalid student token" }, 401);
           studentId = data.id;
           authorId = data.user_id;
@@ -95,22 +105,34 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
         const s = parsed.student ?? {};
         if (!studentId && s.user_id) {
           const { data } = await supabaseAdmin
-            .from("students").select("id").eq("user_id", s.user_id).maybeSingle();
+            .from("students")
+            .select("id")
+            .eq("user_id", s.user_id)
+            .maybeSingle();
           studentId = data?.id ?? null;
         }
         if (!studentId && s.email) {
           // Find auth user by email
           const { data: list } = await supabaseAdmin.auth.admin.listUsers();
-          const authUser = list?.users.find((u) => u.email?.toLowerCase() === s.email!.toLowerCase());
+          const authUser = list?.users.find(
+            (u) => u.email?.toLowerCase() === s.email!.toLowerCase(),
+          );
           if (authUser) {
             const { data } = await supabaseAdmin
-              .from("students").select("id").eq("user_id", authUser.id).maybeSingle();
+              .from("students")
+              .select("id")
+              .eq("user_id", authUser.id)
+              .maybeSingle();
             studentId = data?.id ?? null;
           }
         }
         if (!studentId && s.display_name) {
           const { data } = await supabaseAdmin
-            .from("students").select("id").eq("display_name", s.display_name).limit(1).maybeSingle();
+            .from("students")
+            .select("id")
+            .eq("display_name", s.display_name)
+            .limit(1)
+            .maybeSingle();
           studentId = data?.id ?? null;
         }
         if (!studentId) {
@@ -137,7 +159,8 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
               .insert({ student_id: studentId, session_title: title, session_group: group })
               .select("id")
               .single();
-            if (csErr || !created) return json({ error: "Failed to create session", detail: csErr?.message }, 500);
+            if (csErr || !created)
+              return json({ error: "Failed to create session", detail: csErr?.message }, 500);
             sessionId = created.id;
           }
         }
@@ -154,7 +177,12 @@ export const Route = createFileRoute("/api/public/workbuddy/ingest")({
         const { error: insErr } = await supabaseAdmin.from("timeline_items").insert(rows);
         if (insErr) return json({ error: "Insert failed", detail: insErr.message }, 500);
 
-        return json({ ok: true, student_id: studentId, session_id: sessionId, inserted: rows.length });
+        return json({
+          ok: true,
+          student_id: studentId,
+          session_id: sessionId,
+          inserted: rows.length,
+        });
       },
     },
   },

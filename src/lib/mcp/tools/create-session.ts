@@ -14,11 +14,17 @@ export default defineTool({
       .optional()
       .describe("会话分组: task=任务对话, space=空间/长期主题; 默认 task"),
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
   handler: async ({ title, group }, ctx) => {
     if (!ctx.isAuthenticated()) return unauth();
     const { supabase, student } = await getMyStudent(ctx);
-    if (!student) return { content: [{ type: "text", text: "未找到学员档案(仅学员角色可用)" }], isError: true };
+    if (!student)
+      return { content: [{ type: "text", text: "未找到学员档案(仅学员角色可用)" }], isError: true };
     const { data, error } = await supabase
       .from("sessions")
       .insert({ student_id: student.id, session_title: title, session_group: group ?? "task" })

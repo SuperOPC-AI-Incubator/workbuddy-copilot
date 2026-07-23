@@ -156,9 +156,7 @@ function AuthPage() {
             </p>
           )}
           {info && (
-            <p className="rounded-md border border-primary/30 bg-primary/10 p-2 text-xs">
-              {info}
-            </p>
+            <p className="rounded-md border border-primary/30 bg-primary/10 p-2 text-xs">{info}</p>
           )}
           <button
             type="submit"
@@ -171,7 +169,9 @@ function AuthPage() {
         <p className="mt-4 text-center text-[11px] text-muted-foreground">
           登录后可实时观察学员 PLC 学习过程。
           <br />
-          <Link to="/" className="underline">返回首页</Link>
+          <Link to="/" className="underline">
+            返回首页
+          </Link>
         </p>
       </div>
     </div>

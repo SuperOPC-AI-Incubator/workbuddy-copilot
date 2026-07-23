@@ -66,9 +66,7 @@ export const askAI = createServerFn({ method: "POST" })
 
 export const draftMentorTip = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((input: unknown) =>
-    z.object({ sessionId: z.string().uuid() }).parse(input),
-  )
+  .validator((input: unknown) => z.object({ sessionId: z.string().uuid() }).parse(input))
   .handler(async ({ data, context }) => {
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) throw new Error("Missing DEEPSEEK_API_KEY");

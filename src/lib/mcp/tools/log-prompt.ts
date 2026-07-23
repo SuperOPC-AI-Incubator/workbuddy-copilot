@@ -12,7 +12,12 @@ export default defineTool({
     text: z.string().min(1).max(4000).describe("学员的提问原文"),
     tag: z.string().max(60).optional().describe("可选标签,例如 'PLC/联锁'"),
   },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
   handler: async ({ session_id, text, tag }, ctx) => {
     if (!ctx.isAuthenticated()) return unauth();
     const sb = supabaseForUser(ctx);

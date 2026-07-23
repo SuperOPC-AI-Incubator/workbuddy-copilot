@@ -19,7 +19,8 @@ export default defineTool({
   handler: async ({ title }, ctx) => {
     if (!ctx.isAuthenticated()) return unauth();
     const { supabase, student } = await getMyStudent(ctx);
-    if (!student) return { content: [{ type: "text", text: "未找到学员档案(仅学员角色可用)" }], isError: true };
+    if (!student)
+      return { content: [{ type: "text", text: "未找到学员档案(仅学员角色可用)" }], isError: true };
 
     const sixHoursAgo = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
     const { data: recent } = await supabase
