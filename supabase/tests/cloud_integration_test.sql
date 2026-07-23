@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(124);
+SELECT plan(125);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -749,7 +749,10 @@ SELECT ok(
     SELECT
       resolved.result ->> 'status' = 'active'
       AND resolved.result ->> 'student_id' = credential.student_id::text
-      AND jsonb_object_length(resolved.result) = 2
+      AND resolved.result = pg_catalog.jsonb_build_object(
+        'status', 'active',
+        'student_id', credential.student_id
+      )
       AND NOT resolved.result ? 'token_hash'
       AND NOT resolved.result ? 'token_prefix'
       AND credential.last_used_at IS NOT NULL
@@ -790,6 +793,9 @@ SELECT is(
   'invalid',
   'unknown credential hash is reported as invalid'
 );
+
+DELETE FROM public.workbuddy_credentials
+WHERE token_hash IN (repeat('1', 64), repeat('2', 64));
 
 INSERT INTO cloud_test_results (label, result)
 SELECT
@@ -993,7 +999,7 @@ SELECT is(
       ON item.id = (message_result.result ->> 'message_id')::uuid
     WHERE message_result.label = 'student_one_message'
   ),
-  'Active.Mentor',
+  'active.mentor',
   'mentor message snapshots the current staff username'
 );
 
@@ -1548,6 +1554,16 @@ SELECT throws_ok(
   'delivery identity columns are immutable'
 );
 
+-- Remove the trigger-created matching delivery so the next insert reaches the
+-- composite message/session and session/student foreign keys instead of the
+-- primary-key duplicate check.
+DELETE FROM public.mentor_message_deliveries
+WHERE message_id = (
+  SELECT (result ->> 'message_id')::uuid
+  FROM cloud_test_results
+  WHERE label = 'student_one_message'
+);
+
 SELECT throws_ok(
   $test$
     INSERT INTO public.mentor_message_deliveries (
@@ -1575,8 +1591,54 @@ SELECT throws_ok(
   $test$,
   '23503',
   NULL,
-  'delivery rejects a mismatched session or student'
+  'delivery rejects a session mismatched to its message'
 );
+
+SELECT throws_ok(
+  $test$
+    INSERT INTO public.mentor_message_deliveries (
+      message_id,
+      student_id,
+      session_id
+    )
+    VALUES (
+      (
+        SELECT (result ->> 'message_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'student_one_message'
+      ),
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000002'::uuid
+      ),
+      (
+        SELECT (result ->> 'session_id')::uuid
+        FROM cloud_test_results
+        WHERE label = 'first_ingest'
+      )
+    )
+  $test$,
+  '23503',
+  NULL,
+  'delivery rejects a student mismatched to its session'
+);
+
+INSERT INTO public.mentor_message_deliveries (
+  message_id,
+  student_id,
+  session_id
+)
+SELECT
+  item.id,
+  target_session.student_id,
+  target_session.id
+FROM public.timeline_items AS item
+JOIN public.sessions AS target_session
+  ON target_session.id = item.session_id
+JOIN cloud_test_results AS message_result
+  ON item.id = (message_result.result ->> 'message_id')::uuid
+WHERE message_result.label = 'student_one_message';
 
 SELECT throws_ok(
   $test$
@@ -1597,7 +1659,7 @@ SELECT throws_ok(
       AND item.event_ordinal = 0
   $test$,
   '23514',
-  'mentor_delivery_message_kind_required',
+  'mentor_delivery_message_invalid',
   'mentor delivery rejects a non-mentor timeline item'
 );
 
@@ -1678,7 +1740,7 @@ RESET ROLE;
 SELECT ok(
   (
     SELECT
-      item.author_username = 'Active.Mentor'
+      item.author_username = 'active.mentor'
       AND delivery.message_id = item.id
       AND delivery.fetch_count = 0
       AND target_session.last_severity = 'warn'
@@ -1725,7 +1787,7 @@ SELECT throws_ok(
   'disabled staff cannot insert a mentor message'
 );
 
-SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000103';
+SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000104';
 
 SELECT throws_ok(
   $test$
@@ -1743,7 +1805,7 @@ SELECT throws_ok(
       ),
       'mentor',
       'Must-change staff attempt',
-      '10000000-0000-0000-0000-000000000103'::uuid
+      '10000000-0000-0000-0000-000000000104'::uuid
     )
   $test$,
   '42501',
@@ -1856,18 +1918,18 @@ SELECT ok(
   'student direct session insert remains web-only'
 );
 
+WITH attempted_update AS (
+  UPDATE public.sessions
+  SET session_title = 'Student tried to change service data'
+  WHERE id = (
+    SELECT (result ->> 'session_id')::uuid
+    FROM cloud_test_results
+    WHERE label = 'first_ingest'
+  )
+  RETURNING id
+)
 SELECT is(
   (
-    WITH attempted_update AS (
-      UPDATE public.sessions
-      SET session_title = 'Student tried to change service data'
-      WHERE id = (
-        SELECT (result ->> 'session_id')::uuid
-        FROM cloud_test_results
-        WHERE label = 'first_ingest'
-      )
-      RETURNING id
-    )
     SELECT count(*)
     FROM attempted_update
   ),
@@ -1930,24 +1992,50 @@ WITH inserted_item AS (
     event_ordinal,
     author_username
 )
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'direct_web_item',
+  pg_catalog.jsonb_build_object(
+    'session_id', inserted_item.session_id,
+    'created_at', inserted_item.created_at,
+    'source_event_id', inserted_item.source_event_id,
+    'event_ordinal', inserted_item.event_ordinal,
+    'author_username', inserted_item.author_username
+  )
+FROM inserted_item;
+
 SELECT ok(
-  inserted_item.source_event_id IS NULL
-  AND inserted_item.event_ordinal IS NULL
-  AND inserted_item.author_username IS NULL
-  AND target_session.last_severity = 'error'
-  AND student.last_severity = 'error'
-  AND student.last_active_at >= inserted_item.created_at,
+  (
+    SELECT
+      inserted.result ->> 'source_event_id' IS NULL
+      AND inserted.result ->> 'event_ordinal' IS NULL
+      AND inserted.result ->> 'author_username' IS NULL
+      AND target_session.last_severity = 'error'
+      AND student.last_severity = 'error'
+      AND student.last_active_at >=
+        (inserted.result ->> 'created_at')::timestamptz
+    FROM cloud_test_results AS inserted
+    JOIN public.sessions AS target_session
+      ON target_session.id = (inserted.result ->> 'session_id')::uuid
+    JOIN public.students AS student
+      ON student.id = target_session.student_id
+    WHERE inserted.label = 'direct_web_item'
+  ),
   'student direct timeline insert remains provenance-free; student direct timeline insert updates session and student aggregates'
-)
-FROM inserted_item
-JOIN public.sessions AS target_session
-  ON target_session.id = inserted_item.session_id
-JOIN public.students AS student
-  ON student.id = target_session.student_id;
+);
 
 SELECT results_eq(
-  'SELECT count(*) FROM public.mentor_message_deliveries',
-  ARRAY[1::bigint],
+  $actual$
+    SELECT message_id::text
+    FROM public.mentor_message_deliveries
+    ORDER BY message_id
+  $actual$,
+  $expected$
+    SELECT result ->> 'message_id'
+    FROM cloud_test_results
+    WHERE label IN ('student_one_message', 'direct_mentor_message')
+    ORDER BY result ->> 'message_id'
+  $expected$,
   'student RLS cannot see another student delivery'
 );
 
@@ -2057,13 +2145,21 @@ SELECT throws_ok(
   'create-first refuses a second active credential'
 );
 
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'issued_credential_resolution',
+  public.resolve_workbuddy_credential(repeat('7', 64))
+);
+
 SELECT ok(
   (
     SELECT
-      public.resolve_workbuddy_credential(repeat('7', 64)) ->> 'status' = 'active'
+      resolved.result ->> 'status' = 'active'
       AND credential.last_used_at IS NOT NULL
     FROM public.workbuddy_credentials AS credential
+    CROSS JOIN cloud_test_results AS resolved
     WHERE credential.token_hash = repeat('7', 64)
+      AND resolved.label = 'issued_credential_resolution'
   ),
   'issued credential resolves through the shared hash-only bearer path'
 );

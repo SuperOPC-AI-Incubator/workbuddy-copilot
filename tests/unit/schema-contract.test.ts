@@ -1139,7 +1139,8 @@ describe("cloud integration schema contract", () => {
     expect(pgTap).toMatch(/mixed acknowledgement failure makes no partial update/i);
     expect(pgTap).toMatch(/event rejects a session owned by another student/i);
     expect(pgTap).toMatch(/timeline rejects a session that differs from its event/i);
-    expect(pgTap).toMatch(/delivery rejects a mismatched session or student/i);
+    expect(pgTap).toMatch(/delivery rejects a session mismatched to its message/i);
+    expect(pgTap).toMatch(/delivery rejects a student mismatched to its session/i);
     expect(pgTap).toMatch(/delivery identity columns are immutable/i);
     expect(pgTap).toMatch(/authenticated browsers cannot read credential status directly/i);
   });
@@ -1215,7 +1216,7 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*124\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*125\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);
