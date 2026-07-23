@@ -22,6 +22,7 @@
     "test:connectors": "vitest run tests/unit/workbuddy-connector.test.ts tests/unit/workbuddy-connectors-surface.test.ts",
     "test:connectors:posix": "sh tests/connectors/test-posix.sh",
     "test:connectors:windows": "pwsh -NoLogo -NoProfile -File tests/connectors/test-windows.ps1",
+    "test:ops": "bash tests/ops/deployment-assets.test.sh",
     "ci:forbidden-hosts": "node scripts/ci/check-forbidden-hosts.mjs",
     "start": "node .output/server/index.mjs",
     "check": "bun run format:check && bun run lint -- --max-warnings=0 && bun run typecheck && bun run test && bun run build"
