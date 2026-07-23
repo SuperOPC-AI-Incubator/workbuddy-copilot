@@ -118,7 +118,9 @@ describe("fallback connector installers", () => {
       /if\s*\(\$CredentialFromStdin\)[\s\S]*\[Console\]::IsInputRedirected[\s\S]*\[Console\]::In\.ReadLine\(\)[\s\S]*else\s*\{[\s\S]*Read-Host[\s\S]*-AsSecureString/i,
     );
     expect(source).toMatch(/--token-stdin/);
-    expect(source).toMatch(/icacls[\s\S]*\/inheritance:r/i);
+    expect(source).toMatch(
+      /SetAccessRuleProtection\(\$true,\s*\$false\)[\s\S]*RemoveAccessRuleSpecific[\s\S]*AddAccessRule/i,
+    );
     expect(source).toMatch(/ScheduledTask[\s\S]*(Register|Set)-ScheduledTask/i);
     expect(source).toMatch(/TaskName/);
     expect(source).toMatch(/if\s*\(\s*-not\s*\(Test-Path\s+-LiteralPath\s+\$configPath\)\s*\)/i);
@@ -126,7 +128,7 @@ describe("fallback connector installers", () => {
     expect(source).toMatch(/workbuddy-sync\.ps1/);
     expect(source).toMatch(/Get-Command node/i);
     expect(source).toMatch(/\$nodeLiteral[\s\S]*Set-Content -LiteralPath \$Wrapper[\s\S]*UTF8/i);
-    expect(source).toMatch(/icacls[\s\S]*LASTEXITCODE[\s\S]*throw/i);
+    expect(source).toMatch(/Set-Acl\s+-LiteralPath\s+\$Path\s+-AclObject\s+\$acl/i);
     expect(source).toMatch(
       /\r?\n}\r?\nSet-PrivateFileAcl -Path \$configPath\r?\n\r?\n\$logLiteral/,
     );

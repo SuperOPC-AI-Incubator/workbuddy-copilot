@@ -16,6 +16,16 @@ try {
   $env:LOCALAPPDATA = Join-Path $TestRoot "local"
   New-Item -ItemType Directory -Path $env:USERPROFILE, $env:LOCALAPPDATA -Force | Out-Null
 
+  # Seed an explicit broad ACE on an existing state directory. /inheritance:r
+  # cannot remove explicit entries, so the installer must replace the DACL
+  # instead of only adding the current-user grant.
+  $SeedStateRoot = Join-Path $env:LOCALAPPDATA "SuperBrainCopilot"
+  New-Item -ItemType Directory -Path $SeedStateRoot -Force | Out-Null
+  & icacls $SeedStateRoot /grant:r "*S-1-1-0:(OI)(CI)RX" | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to seed the Windows ACL negative control."
+  }
+
   $Installer = Join-Path $Root "connectors\install-windows.ps1"
   $PowerShell = (Get-Process -Id $PID).Path
   $start = [Diagnostics.ProcessStartInfo]::new()
@@ -93,7 +103,7 @@ try {
         [Security.Principal.SecurityIdentifier]
       ).Value
       if ($ruleSid -ne $currentSid) {
-        throw "ACL grants access to an unexpected principal."
+        throw "ACL grants access to an unexpected principal: path=$path sid=$ruleSid"
       }
       if (
         $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or

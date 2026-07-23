@@ -29,18 +29,42 @@ function Remove-SuperBrainSchedule {
 
 function Set-PrivateDirectoryAcl {
   param([Parameter(Mandatory = $true)][string]$Path)
-  & icacls $Path /inheritance:r /grant:r "$identity`:(OI)(CI)F" | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    throw "Failed to secure directory ACL: $Path"
-  }
+  Set-CurrentUserOnlyAcl `
+    -Path $Path `
+    -InheritanceFlags (
+      [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+      [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    )
 }
 
 function Set-PrivateFileAcl {
   param([Parameter(Mandatory = $true)][string]$Path)
-  & icacls $Path /inheritance:r /grant:r "$identity`:F" | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    throw "Failed to secure file ACL: $Path"
+  Set-CurrentUserOnlyAcl `
+    -Path $Path `
+    -InheritanceFlags ([Security.AccessControl.InheritanceFlags]::None)
+}
+
+function Set-CurrentUserOnlyAcl {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)]
+    [Security.AccessControl.InheritanceFlags]$InheritanceFlags
+  )
+
+  $acl = Get-Acl -LiteralPath $Path
+  $acl.SetAccessRuleProtection($true, $false)
+  foreach ($rule in @($acl.Access)) {
+    [void]$acl.RemoveAccessRuleSpecific($rule)
   }
+  $currentUserRule = [Security.AccessControl.FileSystemAccessRule]::new(
+    $currentSid,
+    [Security.AccessControl.FileSystemRights]::FullControl,
+    $InheritanceFlags,
+    [Security.AccessControl.PropagationFlags]::None,
+    [Security.AccessControl.AccessControlType]::Allow
+  )
+  [void]$acl.AddAccessRule($currentUserRule)
+  Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
 if ($Action -eq "Uninstall") {
@@ -76,7 +100,9 @@ New-Item `
 Copy-Item -LiteralPath $sourceConnector -Destination $Connector -Force
 Copy-Item -LiteralPath $sourceSkill -Destination $SkillTemplate -Force
 
-$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$identity = $currentIdentity.Name
+$currentSid = $currentIdentity.User
 Set-PrivateDirectoryAcl -Path $StateRoot
 Set-PrivateDirectoryAcl -Path $InstallRoot
 Set-PrivateDirectoryAcl -Path (Join-Path $env:USERPROFILE ".workbuddy")

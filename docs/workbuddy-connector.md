@@ -42,7 +42,7 @@ later therefore cannot silently switch the interactive command, launchd, or
 cron to another configuration directory. Every install or upgrade reapplies
 `0700` to the private state directories and `0600` to the existing
 configuration. Windows likewise reapplies the checked current-user-only ACL to
-an existing configuration and aborts if `icacls` returns a nonzero exit code.
+an existing configuration and aborts if Windows rejects the ACL replacement.
 
 The user-Skill location above is consistent with the WorkBuddy examples in
 [腾讯云开发者社区：Skills 目录与 SKILL.md 示例](https://cloud.tencent.com/developer/article/2693324)
