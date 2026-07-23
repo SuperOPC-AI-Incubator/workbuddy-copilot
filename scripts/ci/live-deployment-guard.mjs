@@ -55,3 +55,31 @@ export async function verifyLiveDeploymentBeforeWrite({
 
   return write();
 }
+
+export function isRemoteE2EOrigin(value) {
+  if (!value) return false;
+  const url = new URL(value);
+  return url.hostname !== "localhost" && url.hostname !== "127.0.0.1";
+}
+
+export async function runRequiredE2EAfterDeploymentGuard({
+  environment,
+  fetchImpl = fetch,
+  write,
+}) {
+  const appOrigin = environment.E2E_APP_ORIGIN;
+  if (!isRemoteE2EOrigin(appOrigin)) return write();
+
+  if (environment.LIVE_PREDEPLOY_TEST_PROJECT !== "true") {
+    throw new Error(
+      "LIVE_PREDEPLOY_TEST_PROJECT must equal true before remote required E2E writes",
+    );
+  }
+
+  return verifyLiveDeploymentBeforeWrite({
+    appOrigin,
+    expectedSupabaseUrl: environment.E2E_SUPABASE_URL,
+    fetchImpl,
+    write,
+  });
+}

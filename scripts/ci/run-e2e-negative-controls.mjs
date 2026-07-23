@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import { collectPlaywrightSpecs } from "./playwright-report-contract.mjs";
+import { runRequiredE2EAfterDeploymentGuard } from "./live-deployment-guard.mjs";
+import { validateNegativeControlReport } from "./playwright-report-contract.mjs";
 
 const required = [
   "E2E_SUPABASE_URL",
@@ -81,41 +82,19 @@ async function expectRed(control) {
   } catch {
     throw new Error(`E2E negative control produced no valid test report: ${mode}`);
   }
-  const unexpected = Number(report.stats?.unexpected ?? 0);
-  const expected = Number(report.stats?.expected ?? 0);
-  const skipped = Number(report.stats?.skipped ?? 0);
-  const flaky = Number(report.stats?.flaky ?? 0);
-  const infrastructureErrors = Array.isArray(report.errors) ? report.errors : [];
-  const specs = collectPlaywrightSpecs(report);
-  const target = specs[0];
-  const tests = Array.isArray(target?.tests) ? target.tests : [];
-  const results = Array.isArray(tests[0]?.results) ? tests[0].results : [];
-  const result = results[0];
-  const targetErrorText = JSON.stringify({
-    error: result?.error,
-    errors: result?.errors,
-  });
-  if (
-    unexpected !== 1 ||
-    expected !== 0 ||
-    skipped !== 0 ||
-    flaky !== 0 ||
-    infrastructureErrors.length !== 0 ||
-    specs.length !== 1 ||
-    target?.file !== file ||
-    target?.title !== title ||
-    target?.ok !== false ||
-    tests.length !== 1 ||
-    tests[0]?.expectedStatus !== "passed" ||
-    results.length !== 1 ||
-    result?.status !== "failed" ||
-    !targetErrorText.includes(marker)
-  ) {
+  try {
+    validateNegativeControlReport(report, control);
+  } catch {
     throw new Error(`E2E negative control failed before its target assertion: ${mode}`);
   }
   process.stdout.write(`E2E negative control produced RED as required: ${mode}.\n`);
 }
 
-for (const control of controls) {
-  await expectRed(control);
-}
+await runRequiredE2EAfterDeploymentGuard({
+  environment: process.env,
+  write: async () => {
+    for (const control of controls) {
+      await expectRed(control);
+    }
+  },
+});

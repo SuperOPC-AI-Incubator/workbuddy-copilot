@@ -30,8 +30,10 @@ Each of the four required browser cases has its own automated negative control:
 student-only signup, password rotation, disabled-session sending, and WorkBuddy
 delivery. CI runs each exact file/title pair independently and accepts RED only
 when the JSON report contains one failed test, no skip or infrastructure error,
-and that control's assertion marker. Zero discovery, compilation failure,
-fixture failure, and unrelated assertions cannot satisfy a control.
+one attempt with exactly one assertion error whose first line is that control's
+marker, and no hook, cleanup, or root error. Zero discovery, compilation
+failure, fixture failure, unrelated assertions, and assertion-plus-cleanup
+failures cannot satisfy a control.
 
 Development RED evidence for this change:
 
@@ -50,8 +52,10 @@ Development RED evidence for this change:
   migrations, runs pgTAP, runs the write-enabled concurrency suite with zero
   skips, proves all four browser RED controls, and runs Playwright with one
   worker. The required runner compares the report with an exact four-entry
-  `{file, title}` manifest, not only a test count. Supabase is stopped in an
-  `always()` step.
+  `{file, title}` manifest, not only a test count. Report files must use
+  Playwright's canonical test-directory-relative basenames; absolute, shadow,
+  repeated-root, traversal, and extra-directory forms are rejected. Supabase is
+  stopped in an `always()` step.
 - `connectors`: Node 22 plus Bun on Ubuntu, macOS, and Windows. Linux/macOS run
   the real POSIX installer; Windows runs the real PowerShell installer with
   `-NoSchedule`, verifies protected ACLs, and runs the installed wrapper.
@@ -63,6 +67,11 @@ Development RED evidence for this change:
   and browser-build `VITE_SUPABASE_URL` hash to be mutually consistent and equal
   to the configured E2E Supabase host hash. A missing or mismatched value stops
   the job before any page, browser fixture, or test user write.
+  Both `run-required-playwright.mjs` and `run-e2e-negative-controls.mjs` repeat
+  this guard themselves whenever `E2E_APP_ORIGIN` is not exactly `localhost` or
+  `127.0.0.1`, so invoking either package script directly cannot bypass the
+  disposable-project flag or identity check. The workflow preflight remains
+  defense in depth.
 
 CI disables Playwright traces, screenshots, and video because those artifacts
 can contain typed passwords, authenticated page state, and Auth responses.

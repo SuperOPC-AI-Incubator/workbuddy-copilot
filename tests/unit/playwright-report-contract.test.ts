@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { REQUIRED_E2E_MANIFEST } from "../../scripts/ci/playwright-manifest.mjs";
 import {
   sanitizePlaywrightReport,
+  validateNegativeControlReport,
   validateRequiredPlaywrightReport,
 } from "../../scripts/ci/playwright-report-contract.mjs";
 
@@ -14,6 +15,8 @@ type SyntheticResult = {
   stderr?: unknown;
   attachments?: unknown;
   steps?: unknown;
+  errors?: Array<{ message: string }>;
+  retry?: number;
 };
 
 type SyntheticReport = {
@@ -43,12 +46,12 @@ type SyntheticReport = {
 function passingReport(manifest = REQUIRED_E2E_MANIFEST): SyntheticReport {
   return {
     suites: manifest.map(({ file, title }) => ({
-      title: file,
-      file,
+      title: file.replace("tests/e2e/", ""),
+      file: file.replace("tests/e2e/", ""),
       specs: [
         {
           title,
-          file,
+          file: file.replace("tests/e2e/", ""),
           ok: true,
           tests: [
             {
@@ -68,6 +71,32 @@ function passingReport(manifest = REQUIRED_E2E_MANIFEST): SyntheticReport {
       duration: 68,
     },
   };
+}
+
+const SIGNUP_CONTROL = {
+  mode: "signup-role",
+  file: "tests/e2e/auth-and-mentor.spec.ts",
+  title: REQUIRED_E2E_MANIFEST[0].title,
+  marker: "NEGATIVE_CONTROL_SIGNUP_ROLE_REACHED",
+};
+
+function negativeControlReport(
+  errorMessages: string[],
+  rootErrors: unknown[] = [],
+): SyntheticReport {
+  const report = passingReport([REQUIRED_E2E_MANIFEST[0]]);
+  report.errors = rootErrors;
+  report.stats.expected = 0;
+  report.stats.unexpected = 1;
+  const spec = report.suites[0].specs[0];
+  spec.ok = false;
+  spec.tests[0].results[0] = {
+    status: "failed",
+    duration: 17,
+    retry: 0,
+    errors: errorMessages.map((message) => ({ message })),
+  };
+  return report;
 }
 
 describe("required Playwright report contract", () => {
@@ -101,6 +130,53 @@ describe("required Playwright report contract", () => {
     expect(() =>
       validateRequiredPlaywrightReport(passingReport(replaced), REQUIRED_E2E_MANIFEST),
     ).toThrow("manifest");
+  });
+
+  test("rejects shadow, repeated-root, absolute, and traversal report paths", () => {
+    for (const invalidFile of [
+      "shadow/tests/e2e/tests/e2e/auth-and-mentor.spec.ts",
+      "shadow/tests/e2e/auth-and-mentor.spec.ts",
+      "/tmp/tests/e2e/auth-and-mentor.spec.ts",
+      "../auth-and-mentor.spec.ts",
+    ]) {
+      const report = passingReport();
+      report.suites[0].file = invalidFile;
+      report.suites[0].specs[0].file = invalidFile;
+      expect(
+        () => validateRequiredPlaywrightReport(report, REQUIRED_E2E_MANIFEST),
+        invalidFile,
+      ).toThrow("manifest");
+    }
+  });
+});
+
+describe("negative-control report contract", () => {
+  test("accepts one isolated target assertion error with an exact first-line marker", () => {
+    const report = negativeControlReport([`${SIGNUP_CONTROL.marker}\nassertion failure`]);
+
+    expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).not.toThrow();
+  });
+
+  test("rejects a target assertion failure followed by an afterEach cleanup error", () => {
+    const report = negativeControlReport([
+      `${SIGNUP_CONTROL.marker}\nassertion failure`,
+      "afterEach cleanup failed",
+    ]);
+
+    expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).toThrow(
+      "exactly one target assertion error",
+    );
+  });
+
+  test("rejects a target assertion accompanied by a root or hook error", () => {
+    const report = negativeControlReport(
+      [`${SIGNUP_CONTROL.marker}\nassertion failure`],
+      [{ message: "afterAll hook failed" }],
+    );
+
+    expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).toThrow(
+      "isolated target failure",
+    );
   });
 });
 

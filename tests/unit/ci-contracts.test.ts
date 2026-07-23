@@ -60,13 +60,22 @@ describe("cloud-loop CI contracts", () => {
     expect(reportContract).toMatch(/stats\.skipped/);
     expect(reportContract).toMatch(/stats\.unexpected/);
     expect(reportContract).toMatch(/stats\.flaky/);
-    expect(negativeControl).toMatch(/stats\?\.unexpected/);
-    expect(negativeControl).toMatch(/infrastructureErrors\.length !== 0/);
-    expect(negativeControl).toMatch(/result\?\.errors/);
+    expect(reportContract).toMatch(/infrastructureErrors\.length !== 0/);
+    expect(reportContract).toMatch(/resultErrors\.length !== 1/);
+    expect(reportContract).toMatch(/assertionMarkerLine/);
+    expect(reportContract).not.toMatch(/lastIndexOf/);
+    expect(negativeControl).toMatch(/validateNegativeControlReport/);
+    expect(negativeControl).toMatch(
+      /await runRequiredE2EAfterDeploymentGuard\(\{[\s\S]*write:\s*async\s*\(\)\s*=>\s*\{[\s\S]*for \(const control of controls\)/,
+    );
     expect(negativeControl.match(/NEGATIVE_CONTROL_[A-Z_]+_REACHED/g)).toHaveLength(4);
     expect(`${authE2E}\n${workbuddyE2E}`).not.toMatch(/NEGATIVE_CONTROL_[A-Z_]+_REACHED/);
     expect(manifest.match(/tests\/e2e\/[a-z-]+\.spec\.ts/g)).toHaveLength(4);
     expect(e2e).toMatch(/validateRequiredPlaywrightReport/);
+    expect(e2e).toMatch(/runRequiredE2EAfterDeploymentGuard/);
+    expect(e2e).toMatch(
+      /await runRequiredE2EAfterDeploymentGuard\(\{[\s\S]*write:\s*async\s*\(\)\s*=>\s*\{[\s\S]*const child = spawn/,
+    );
     expect(playwrightConfig).toMatch(/process\.env\.CI/);
     expect(playwrightConfig).toMatch(/trace:\s*retainBrowserArtifacts[^]*:\s*"off"/);
   });

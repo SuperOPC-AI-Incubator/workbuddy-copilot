@@ -5,6 +5,15 @@ export function validateRequiredPlaywrightReport(
   report: unknown,
   manifest: readonly RequiredE2EManifestEntry[],
 ): void;
+export function validateNegativeControlReport(
+  report: unknown,
+  control: {
+    mode: string;
+    file: string;
+    title: string;
+    marker: string;
+  },
+): void;
 export function sanitizePlaywrightReport(
   report: unknown,
   manifest: readonly RequiredE2EManifestEntry[],
