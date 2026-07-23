@@ -238,7 +238,7 @@ function MentorDesk() {
     let mounted = true;
     supabase
       .from("students")
-      .select("*")
+      .select("id, user_id, display_name, last_severity, last_active_at, created_at, updated_at")
       .order("last_active_at", { ascending: false })
       .then(({ data }) => {
         if (!mounted || !data) return;
@@ -248,15 +248,24 @@ function MentorDesk() {
 
     const ch = supabase
       .channel("students-rt")
-      .on("postgres_changes", { event: "*", schema: "public", table: "students" }, (payload) => {
-        setStudents((prev) =>
-          applyChange(
-            prev,
-            payload,
-            (a, b) => new Date(b.last_active_at).getTime() - new Date(a.last_active_at).getTime(),
-          ),
-        );
-      })
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "students",
+          select: ["id", "display_name", "last_severity", "last_active_at"],
+        },
+        (payload) => {
+          setStudents((prev) =>
+            applyChange(
+              prev,
+              payload,
+              (a, b) => new Date(b.last_active_at).getTime() - new Date(a.last_active_at).getTime(),
+            ),
+          );
+        },
+      )
       .subscribe((status) => setWsConnected(status === "SUBSCRIBED"));
     return () => {
       mounted = false;

@@ -16,17 +16,20 @@ function WorkBuddySetup() {
 
   useEffect(() => {
     (async () => {
-      const { data: u } = await supabase.auth.getUser();
-      if (!u.user) return;
-      const { data, error } = await supabase
-        .from("students")
-        .select("display_name, workbuddy_token")
-        .eq("user_id", u.user.id)
-        .maybeSingle();
+      const { data, error } = await supabase.rpc("get_my_legacy_workbuddy_setup");
       if (error) return setErr(error.message);
-      if (!data) return setErr("未找到学员档案。请以学员身份登录。");
-      setName(data.display_name);
-      setToken(data.workbuddy_token);
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        return setErr("未找到学员档案。请以学员身份登录。");
+      }
+
+      const displayName = data.display_name;
+      const workbuddyToken = data.workbuddy_token;
+      if (typeof displayName !== "string" || typeof workbuddyToken !== "string") {
+        return setErr("学员配置格式无效，请联系管理员。");
+      }
+
+      setName(displayName);
+      setToken(workbuddyToken);
     })();
   }, []);
 
