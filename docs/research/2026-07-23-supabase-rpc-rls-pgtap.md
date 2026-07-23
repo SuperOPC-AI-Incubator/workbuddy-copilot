@@ -28,6 +28,8 @@ Task 3B 的技术方案已经锁定。本次只核对 PostgreSQL/Supabase 的函
 - `students` 的 Realtime 订阅也显式使用 `select` 限制为 UI 所需的四列，避免变更流重新暴露未授权字段。
 - 旧 token 以 pgcrypto SHA-256 写入 `workbuddy_credentials`，展示前缀同样从 hash 派生，因此短 token 或带空白 token 不会破坏约束；`source='legacy_token_backfill'` 明确标注过渡来源，重复执行以 token hash 冲突为幂等边界。
 - 已有 mentor/team_admin 只接受 `auth.users.raw_app_meta_data` 中同时存在的 `account_kind='staff'` 与显式 `staff_username`。迁移绝不从邮箱或用户可编辑 metadata 猜用户名。
+- 导师用户名映射出的 Supabase Auth 邮箱是 opaque 实现标识，不是秘密；标准 Supabase session/JWT 与客户端 `user` 对象仍会携带该邮箱 claim。本项目不承诺把它从浏览器 session/JWT 中移除，但禁止将其作为一等字段返回到登录 DTO、显示在 UI、写入日志或暴露在账号管理响应中。公开显示身份只取 `staff_accounts.username` 或学员 profile。
+- 首次改密由携带当前 Supabase bearer token 的 POST serverFn 编排：服务端只采用认证中间件给出的 `userId`，先通过 Auth Admin 更新密码，再以 `service_role` 调用显式目标的完成函数。浏览器角色无权执行完成函数；Auth 更新失败时绝不清除 `must_change_password`，完成步骤支持同一激活导师幂等重试。
 - 若已有特权角色无法映射到 `staff_accounts`，迁移以 SQLSTATE `PST01`、消息 `unresolved_staff_accounts` 中止。管理员应先用可信 Auth Admin 路径补齐上述 app metadata，再重跑迁移；空白/新项目没有既有特权角色，因此不受影响。
 - 认证端会话写入只允许 `source='web'` 且无 source key；timeline 客户端列权限不包含 connector provenance。导师直写与 service RPC 都经过同一 BEFORE/AFTER trigger 链，统一派生用户名并原子创建待投递记录。
 - 原有 timeline 聚合触发器函数改为最小权限 `SECURITY DEFINER`，在收紧客户端 UPDATE 权限后仍能更新 session/student 的严重度与活跃时间。

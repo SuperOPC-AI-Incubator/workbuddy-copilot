@@ -15,14 +15,20 @@ CREATE TABLE public.staff_accounts (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT staff_accounts_username_check
-    CHECK (username = btrim(username) AND char_length(username) BETWEEN 1 AND 128),
+    CHECK (
+      username = normalized_username
+      AND username = btrim(username)
+      AND char_length(username) BETWEEN 2 AND 32
+      AND username ~ '^[a-z0-9][a-z0-9._-]{1,31}$'
+    ),
   CONSTRAINT staff_accounts_normalized_username_check
     CHECK (
-      normalized_username = lower(btrim(username))
-      AND char_length(normalized_username) BETWEEN 1 AND 128
+      normalized_username = lower(btrim(normalized_username))
+      AND char_length(normalized_username) BETWEEN 2 AND 32
+      AND normalized_username ~ '^[a-z0-9][a-z0-9._-]{1,31}$'
     ),
   CONSTRAINT staff_accounts_auth_identity_version_check
-    CHECK (auth_identity_version >= 1),
+    CHECK (auth_identity_version = 1),
   CONSTRAINT staff_accounts_disabled_state_check
     CHECK (
       (is_active AND disabled_at IS NULL AND disabled_by IS NULL)
@@ -50,15 +56,8 @@ INSERT INTO public.staff_accounts (
 SELECT DISTINCT
   auth_user.id,
   btrim(auth_user.raw_app_meta_data ->> 'staff_username'),
-  lower(btrim(auth_user.raw_app_meta_data ->> 'staff_username')),
-  CASE
-    WHEN auth_user.raw_app_meta_data ->> 'auth_identity_version'
-      ~ '^[1-9][0-9]{0,8}$'
-    THEN (
-      auth_user.raw_app_meta_data ->> 'auth_identity_version'
-    )::integer
-    ELSE 1
-  END
+  btrim(auth_user.raw_app_meta_data ->> 'staff_username'),
+  1
 FROM public.user_roles AS staff_role
 JOIN auth.users AS auth_user
   ON auth_user.id = staff_role.user_id
@@ -67,10 +66,17 @@ WHERE staff_role.role IN (
     'team_admin'::public.app_role
   )
   AND auth_user.raw_app_meta_data ->> 'account_kind' = 'staff'
-  AND btrim(auth_user.raw_app_meta_data ->> 'staff_username') <> ''
+  AND btrim(auth_user.raw_app_meta_data ->> 'staff_username')
+    = lower(btrim(auth_user.raw_app_meta_data ->> 'staff_username'))
   AND char_length(
     btrim(auth_user.raw_app_meta_data ->> 'staff_username')
-  ) BETWEEN 1 AND 128
+  ) BETWEEN 2 AND 32
+  AND btrim(auth_user.raw_app_meta_data ->> 'staff_username')
+    ~ '^[a-z0-9][a-z0-9._-]{1,31}$'
+  AND (
+    auth_user.raw_app_meta_data ->> 'auth_identity_version' IS NULL
+    OR auth_user.raw_app_meta_data ->> 'auth_identity_version' = '1'
+  )
 ON CONFLICT DO NOTHING;
 
 DO $existing_staff_guard$
@@ -508,31 +514,26 @@ LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = ''
 AS $function$
-DECLARE
-  trimmed_username text;
-  derived_normalized_username text;
 BEGIN
-  trimmed_username := pg_catalog.btrim(_username);
-  derived_normalized_username := pg_catalog.lower(
-    pg_catalog.btrim(_username)
-  );
-
   IF _user_id IS NULL THEN
     RAISE EXCEPTION USING
       ERRCODE = '22004',
       MESSAGE = 'staff_user_id_required';
   END IF;
 
-  IF trimmed_username IS NULL
-    OR pg_catalog.char_length(trimmed_username) NOT BETWEEN 1 AND 128
-    OR pg_catalog.char_length(derived_normalized_username) NOT BETWEEN 1 AND 128
+  IF _username IS NULL
+    OR _username IS DISTINCT FROM pg_catalog.lower(
+      pg_catalog.btrim(_username)
+    )
+    OR pg_catalog.char_length(_username) NOT BETWEEN 2 AND 32
+    OR _username !~ '^[a-z0-9][a-z0-9._-]{1,31}$'
   THEN
     RAISE EXCEPTION USING
       ERRCODE = '22023',
       MESSAGE = 'invalid_staff_username';
   END IF;
 
-  IF _auth_identity_version IS NULL OR _auth_identity_version < 1 THEN
+  IF _auth_identity_version IS NULL OR _auth_identity_version <> 1 THEN
     RAISE EXCEPTION USING
       ERRCODE = '22023',
       MESSAGE = 'invalid_auth_identity_version';
@@ -547,8 +548,8 @@ BEGIN
   )
   VALUES (
     _user_id,
-    trimmed_username,
-    derived_normalized_username,
+    _username,
+    _username,
     _auth_identity_version,
     _created_by
   );
@@ -565,8 +566,8 @@ BEGIN
 
   RETURN pg_catalog.jsonb_build_object(
     'user_id', _user_id,
-    'username', trimmed_username,
-    'normalized_username', derived_normalized_username,
+    'username', _username,
+    'normalized_username', _username,
     'auth_identity_version', _auth_identity_version,
     'is_team_admin', _is_team_admin,
     'must_change_password', true
@@ -588,6 +589,56 @@ GRANT EXECUTE ON FUNCTION public.provision_staff_account(
   uuid,
   boolean
 ) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.complete_staff_password_change(
+  _user_id uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $function$
+DECLARE
+  updated_rows integer;
+BEGIN
+  IF _user_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22004',
+      MESSAGE = 'staff_user_id_required';
+  END IF;
+
+  UPDATE public.staff_accounts
+  SET must_change_password = false
+  WHERE user_id = _user_id
+    AND is_active = true
+    AND must_change_password = true;
+
+  GET DIAGNOSTICS updated_rows = ROW_COUNT;
+
+  IF updated_rows = 1 THEN
+    RETURN true;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM public.staff_accounts
+    WHERE user_id = _user_id
+      AND is_active = true
+      AND must_change_password = false
+  ) THEN
+    RETURN true;
+  END IF;
+
+  RAISE EXCEPTION USING
+    ERRCODE = '42501',
+    MESSAGE = 'active_staff_account_required';
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.complete_staff_password_change(uuid)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.complete_staff_password_change(uuid)
+  TO service_role;
 
 -- Both direct web/MCP inserts and the service RPC use this single author
 -- snapshot path. Caller-supplied snapshots and connector provenance are

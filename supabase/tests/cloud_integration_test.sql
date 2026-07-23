@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(36);
+SELECT plan(46);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -101,26 +101,85 @@ VALUES
     '10000000-0000-0000-0000-000000000103'::uuid,
     'must-change-mentor@example.invalid',
     '{"account_kind":"staff"}'::jsonb
+  ),
+  (
+    '10000000-0000-0000-0000-000000000104'::uuid,
+    'other-must-change-mentor@example.invalid',
+    '{"account_kind":"staff"}'::jsonb
   );
 
 SET LOCAL ROLE service_role;
+
+SELECT throws_ok(
+  $test$
+    SELECT public.provision_staff_account(
+      _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+      _username => 'Uppercase.mentor'
+    )
+  $test$,
+  '22023',
+  'invalid_staff_username',
+  'provisioning rejects uppercase staff usernames'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.provision_staff_account(
+      _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+      _username => 'ｆｕｌｌｗｉｄｔｈ'
+    )
+  $test$,
+  '22023',
+  'invalid_staff_username',
+  'provisioning rejects fullwidth staff usernames'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.provision_staff_account(
+      _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+      _username => 'a'
+    )
+  $test$,
+  '22023',
+  'invalid_staff_username',
+  'provisioning rejects out-of-range staff usernames'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.provision_staff_account(
+      _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+      _username => 'version.two',
+      _auth_identity_version => 2
+    )
+  $test$,
+  '22023',
+  'invalid_auth_identity_version',
+  'provisioning rejects unsupported auth identity versions'
+);
 
 DO $setup$
 BEGIN
   PERFORM public.provision_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000101'::uuid,
-    _username => 'Active.Mentor',
+    _username => 'active.mentor',
     _auth_identity_version => 1,
     _is_team_admin => true
   );
   PERFORM public.provision_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000102'::uuid,
-    _username => 'Disabled.Mentor',
+    _username => 'disabled.mentor',
     _auth_identity_version => 1
   );
   PERFORM public.provision_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000103'::uuid,
-    _username => 'Must.Change',
+    _username => 'must.change',
+    _auth_identity_version => 1
+  );
+  PERFORM public.provision_staff_account(
+    _user_id => '10000000-0000-0000-0000-000000000104'::uuid,
+    _username => 'other.must.change',
     _auth_identity_version => 1
   );
 END;
@@ -128,10 +187,7 @@ $setup$;
 
 UPDATE public.staff_accounts
 SET must_change_password = false
-WHERE user_id IN (
-  '10000000-0000-0000-0000-000000000101'::uuid,
-  '10000000-0000-0000-0000-000000000102'::uuid
-);
+WHERE user_id = '10000000-0000-0000-0000-000000000101'::uuid;
 
 UPDATE public.staff_accounts
 SET
@@ -173,6 +229,76 @@ SELECT ok(
   ),
   'staff awaiting password change has no active role'
 );
+
+SET LOCAL ROLE authenticated;
+SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000103';
+
+SELECT throws_ok(
+  $test$
+    SELECT public.complete_staff_password_change(
+      '10000000-0000-0000-0000-000000000103'::uuid
+    )
+  $test$,
+  '42501',
+  'permission denied for function complete_staff_password_change',
+  'authenticated browser cannot complete a staff password change'
+);
+
+RESET ROLE;
+SET LOCAL ROLE service_role;
+
+SELECT is(
+  public.complete_staff_password_change(
+    '10000000-0000-0000-0000-000000000103'::uuid
+  ),
+  true,
+  'service role completes an explicit active staff password change'
+);
+
+SELECT is(
+  public.complete_staff_password_change(
+    '10000000-0000-0000-0000-000000000103'::uuid
+  ),
+  true,
+  'password completion is idempotent for retry'
+);
+
+SELECT ok(
+  (
+    SELECT
+      completed.must_change_password = false
+      AND untouched.must_change_password = true
+    FROM public.staff_accounts AS completed
+    CROSS JOIN public.staff_accounts AS untouched
+    WHERE completed.user_id = '10000000-0000-0000-0000-000000000103'::uuid
+      AND untouched.user_id = '10000000-0000-0000-0000-000000000104'::uuid
+  ),
+  'password completion updates only the explicit active staff row'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.complete_staff_password_change(
+      '10000000-0000-0000-0000-000000000001'::uuid
+    )
+  $test$,
+  '42501',
+  'active_staff_account_required',
+  'service role cannot complete a student password change'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.complete_staff_password_change(
+      '10000000-0000-0000-0000-000000000102'::uuid
+    )
+  $test$,
+  '42501',
+  'active_staff_account_required',
+  'service role cannot complete a disabled staff password change'
+);
+
+RESET ROLE;
 
 SET LOCAL ROLE service_role;
 

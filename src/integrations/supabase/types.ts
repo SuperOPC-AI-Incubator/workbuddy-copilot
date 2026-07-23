@@ -369,6 +369,12 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      complete_staff_password_change: {
+        Args: {
+          _user_id: string;
+        };
+        Returns: boolean;
+      };
       create_mentor_message: {
         Args: {
           _author_user_id: string;

@@ -1,11 +1,14 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
+import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState, type FormEvent } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { buildChangePasswordHref, safePostAuthPath } from "@/lib/auth/navigation";
+import { signIn } from "@/lib/auth/signin.functions";
 
 export const Route = createFileRoute("/auth")({
   ssr: false,
   validateSearch: (s: Record<string, unknown>) => ({
-    next: typeof s.next === "string" ? s.next : undefined,
+    next: safePostAuthPath(s.next),
   }),
   component: AuthPage,
 });
@@ -13,19 +16,20 @@ export const Route = createFileRoute("/auth")({
 function AuthPage() {
   const navigate = useNavigate();
   const { next } = Route.useSearch();
-  const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  const safeNext = safePostAuthPath(next);
   const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
+  const [signupEmail, setSignupEmail] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
-  const [role, setRole] = useState<"student" | "mentor">("student");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const signInFn = useServerFn(signIn);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
-      if (data.user) window.location.replace(safeNext);
+      if (data.user) void navigate({ href: safeNext, replace: true });
     });
   }, [navigate, safeNext]);
 
@@ -37,23 +41,35 @@ function AuthPage() {
     try {
       if (mode === "signup") {
         const { data, error } = await supabase.auth.signUp({
-          email,
+          email: signupEmail,
           password,
           options: {
             emailRedirectTo: window.location.origin + safeNext,
             data: {
-              display_name: displayName || email.split("@")[0],
-              role,
+              display_name: displayName || signupEmail.split("@")[0],
+              role: "student",
             },
           },
         });
         if (error) throw error;
-        if (data.session) window.location.replace(safeNext);
+        if (data.session) await navigate({ href: safeNext, replace: true });
         else setInfo("注册成功，请查收邮箱验证链接后再登录。");
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        window.location.replace(safeNext);
+        const session = await signInFn({
+          data: { identifier, password },
+        });
+        const { error } = await supabase.auth.setSession({
+          access_token: session.access_token,
+          refresh_token: session.refresh_token,
+        });
+        if (error) throw new Error("登录会话建立失败，请重试。");
+        // Supabase sessions retain their opaque Auth email claim. Display identity
+        // must always come from the public DTO/profile, never from that session claim.
+        const destination =
+          session.public.accountType === "staff" && session.public.mustChangePassword
+            ? buildChangePasswordHref(safeNext)
+            : safeNext;
+        await navigate({ href: destination, replace: true });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "认证失败");
@@ -100,44 +116,40 @@ function AuthPage() {
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
-                  placeholder="张老师 / 陈同学"
+                  placeholder="陈同学"
                 />
               </label>
-              <div className="block text-xs">
-                <span className="mb-1 block text-muted-foreground">身份</span>
-                <div className="flex gap-2">
-                  {(["student", "mentor"] as const).map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      onClick={() => setRole(r)}
-                      className={`flex-1 rounded-md border px-3 py-2 text-sm transition-colors ${
-                        role === r
-                          ? "border-primary bg-primary/10 text-foreground"
-                          : "text-muted-foreground hover:bg-accent"
-                      }`}
-                    >
-                      {r === "student" ? "学员" : "导师"}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-1 text-[10px] text-muted-foreground">
-                  学员：只能看到并管理自己的对话；导师：可观察全部学员的学习过程。
-                </p>
-              </div>
+              <p className="rounded-md bg-muted px-3 py-2 text-[11px] text-muted-foreground">
+                公开注册只会创建学员账号。
+              </p>
             </>
           )}
-          <label className="block text-xs">
-            <span className="mb-1 block text-muted-foreground">邮箱</span>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
-              placeholder="mentor@example.com"
-            />
-          </label>
+          {mode === "signup" ? (
+            <label className="block text-xs">
+              <span className="mb-1 block text-muted-foreground">学员邮箱</span>
+              <input
+                type="email"
+                required
+                value={signupEmail}
+                onChange={(e) => setSignupEmail(e.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                placeholder="student@example.com"
+              />
+            </label>
+          ) : (
+            <label className="block text-xs">
+              <span className="mb-1 block text-muted-foreground">用户名或学员邮箱</span>
+              <input
+                type="text"
+                required
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                placeholder="导师用户名 / student@example.com"
+                autoComplete="username"
+              />
+            </label>
+          )}
           <label className="block text-xs">
             <span className="mb-1 block text-muted-foreground">密码</span>
             <input

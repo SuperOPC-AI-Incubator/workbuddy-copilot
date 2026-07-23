@@ -416,6 +416,12 @@ describe("cloud integration schema contract", () => {
       Args: Record<PropertyKey, never>;
       Returns: Json;
     }>();
+    expectTypeOf<
+      Database["public"]["Functions"]["complete_staff_password_change"]
+    >().toEqualTypeOf<{
+      Args: { _user_id: string };
+      Returns: boolean;
+    }>();
   });
 
   test("isolates the team_admin enum change in its own migration", () => {
@@ -443,8 +449,13 @@ describe("cloud integration schema contract", () => {
     expectColumnDefinition(table, /\bauth_identity_version\s+integer\s+NOT NULL\s+DEFAULT\s+1/i);
     expectColumnDefinition(table, /\bis_active\s+boolean\s+NOT NULL\s+DEFAULT\s+true/i);
     expectColumnDefinition(table, /\bmust_change_password\s+boolean\s+NOT NULL\s+DEFAULT\s+true/i);
-    expect(table).toMatch(/\bCHECK\s*\(\s*auth_identity_version\s*>=\s*1\s*\)/i);
-    expect(table).toMatch(/\bCHECK\s*\(\s*normalized_username\s*=\s*lower\(/i);
+    expect(table).toMatch(/\bCHECK\s*\(\s*auth_identity_version\s*=\s*1\s*\)/i);
+    expect(table).toMatch(
+      /\busername\s*=\s*normalized_username[\s\S]*?username\s*~\s*'\^\[a-z0-9\]\[a-z0-9\._-\]\{1,31\}\$'/i,
+    );
+    expect(table).toMatch(
+      /\bnormalized_username\s*=\s*lower\s*\(\s*btrim\s*\(\s*normalized_username\s*\)\s*\)[\s\S]*?normalized_username\s*~\s*'\^\[a-z0-9\]\[a-z0-9\._-\]\{1,31\}\$'/i,
+    );
     expect(cloudMigration).toMatch(
       /CREATE\s+INDEX\s+\w+\s+ON\s+public\.staff_accounts\s*\(\s*is_active\s*\)/i,
     );
@@ -578,6 +589,7 @@ describe("cloud integration schema contract", () => {
     ];
     const serviceInvokerFunctions = [
       "provision_staff_account",
+      "complete_staff_password_change",
       "ingest_workbuddy_turn",
       "create_mentor_message",
     ];
@@ -602,6 +614,12 @@ describe("cloud integration schema contract", () => {
     );
     expect(cloudMigration).toMatch(
       /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.mark_mentor_messages_web_seen\s*\([^;]*\)\s+TO\s+authenticated/i,
+    );
+    expect(cloudMigration).toMatch(
+      /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.complete_staff_password_change\s*\(\s*uuid\s*\)\s+TO\s+service_role/i,
+    );
+    expect(cloudMigration).not.toMatch(
+      /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.complete_staff_password_change\s*\([^;]*\)\s+TO\s+(?:anon|authenticated)/i,
     );
 
     for (const functionName of serviceInvokerFunctions) {
@@ -653,8 +671,12 @@ describe("cloud integration schema contract", () => {
     expect(signature).toMatch(/\b_auth_identity_version\s+integer\b/i);
     expect(signature).toMatch(/\b_is_team_admin\s+boolean\b/i);
     expect(signature).not.toMatch(/\b_role\s+public\.app_role\b/i);
-    expect(provisioner).toMatch(/\blower\s*\(\s*pg_catalog\.btrim\s*\(\s*_username\s*\)\s*\)/i);
-    expect(provisioner).toMatch(/\b_auth_identity_version\s*<\s*1\b/i);
+    expect(provisioner).toMatch(
+      /\b_username\s+IS\s+DISTINCT\s+FROM\s+pg_catalog\.lower\s*\(\s*pg_catalog\.btrim\s*\(\s*_username\s*\)\s*\)/i,
+    );
+    expect(provisioner).toMatch(/\b_username\s*!~\s*'\^\[a-z0-9\]\[a-z0-9\._-\]\{1,31\}\$'/i);
+    expect(provisioner).toMatch(/\b_auth_identity_version\s*<>\s*1\b/i);
+    expect(provisioner).not.toMatch(/derived_normalized_username\s*:=\s*pg_catalog\.lower/i);
     expect(provisioner).toMatch(
       /INSERT\s+INTO\s+public\.staff_accounts[\s\S]*?normalized_username/i,
     );
@@ -664,6 +686,19 @@ describe("cloud integration schema contract", () => {
     expect(provisioner).toMatch(
       /IF\s+_is_team_admin[\s\S]*?INSERT\s+INTO\s+public\.user_roles[\s\S]*?'team_admin'::public\.app_role/i,
     );
+  });
+
+  test("allows only the service role to complete an explicit active staff password change", () => {
+    const completion = functionDefinition(cloudMigration, "complete_staff_password_change");
+    const signature = completion.slice(0, completion.search(/\bRETURNS\b/i));
+
+    expect(signature).toMatch(/complete_staff_password_change\s*\(\s*_user_id\s+uuid\s*\)/i);
+    expect(completion).toMatch(/\bSECURITY\s+INVOKER\b/i);
+    expect(completion).toMatch(
+      /UPDATE\s+public\.staff_accounts[\s\S]*?must_change_password\s*=\s*false[\s\S]*?user_id\s*=\s*_user_id[\s\S]*?is_active\s*=\s*true/i,
+    );
+    expect(completion).not.toMatch(/\bauth\.uid\s*\(/i);
+    expectRevokedFromClients("complete_staff_password_change");
   });
 
   test("ingests a turn through an event-first idempotency boundary", () => {
@@ -1032,6 +1067,7 @@ describe("cloud integration schema contract", () => {
     for (const functionName of [
       "has_active_role",
       "provision_staff_account",
+      "complete_staff_password_change",
       "ingest_workbuddy_turn",
       "create_mentor_message",
       "mark_mentor_messages_web_seen",
@@ -1052,6 +1088,22 @@ describe("cloud integration schema contract", () => {
     expect(generatedTypes).toMatch(
       /mark_mentor_messages_web_seen:\s*\{[\s\S]*?_message_ids:\s*string\[\][\s\S]*?Returns:\s*number/i,
     );
+    expect(generatedTypes).toMatch(
+      /complete_staff_password_change:\s*\{[\s\S]*?Args:\s*\{\s*_user_id:\s*string\s*;\s*\}\s*;[\s\S]*?Returns:\s*boolean/i,
+    );
+  });
+
+  test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*46\s*\)/i);
+    expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
+    expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
+    expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);
+    expect(pgTap).toMatch(/rejects unsupported auth identity versions/i);
+    expect(pgTap).toMatch(/authenticated browser cannot complete a staff password change/i);
+    expect(pgTap).toMatch(/password completion updates only the explicit active staff row/i);
+    expect(pgTap).toMatch(/password completion is idempotent for retry/i);
+    expect(pgTap).toMatch(/service role cannot complete a student password change/i);
+    expect(pgTap).toMatch(/service role cannot complete a disabled staff password change/i);
   });
 
   test("does not contain destructive data operations", () => {

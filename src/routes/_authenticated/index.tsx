@@ -47,7 +47,7 @@ function MentorDesk() {
   const [composeText, setComposeText] = useState("");
   const [collapsed, setCollapsed] = useState({ space: false, task: false });
   const [wsConnected, setWsConnected] = useState(false);
-  const [userEmail, setUserEmail] = useState<string>("");
+  const [accountLabel, setAccountLabel] = useState<string>("");
   const [role, setRole] = useState<"mentor" | "student" | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const askAIFn = useServerFn(askAI);
@@ -68,16 +68,63 @@ function MentorDesk() {
     role === "mentor" && now - new Date(s.last_active_at).getTime() > STALE_MS;
 
   useEffect(() => {
+    let mounted = true;
+
     supabase.auth.getUser().then(async ({ data }) => {
-      setUserEmail(data.user?.email ?? "");
       if (!data.user) return;
-      const { data: roles } = await supabase
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", data.user.id);
-      const isMentor = roles?.some((r) => r.role === "mentor");
-      setRole(isMentor ? "mentor" : "student");
+
+      const [
+        { data: roles, error: rolesError },
+        { data: staff, error: staffError },
+        { data: student, error: studentError },
+      ] = await Promise.all([
+        supabase.from("user_roles").select("role").eq("user_id", data.user.id),
+        supabase
+          .from("staff_accounts")
+          .select("username, is_active")
+          .eq("user_id", data.user.id)
+          .maybeSingle(),
+        supabase.from("students").select("display_name").eq("user_id", data.user.id).maybeSingle(),
+      ]);
+
+      if (!mounted) return;
+
+      const hasStaffRole = roles?.some(
+        ({ role: accountRole }) => accountRole === "mentor" || accountRole === "team_admin",
+      );
+      const hasStudentRole = roles?.some(({ role: accountRole }) => accountRole === "student");
+      const staffAccessInvalid =
+        rolesError || staffError || (staff && (!staff.is_active || !hasStaffRole));
+
+      if (staffAccessInvalid || (!staff && hasStaffRole)) {
+        setAccountLabel("");
+        setRole(null);
+        await supabase.auth.signOut();
+        if (mounted) window.location.replace("/auth");
+        return;
+      }
+
+      if (staff) {
+        setAccountLabel(staff.username);
+        setRole("mentor");
+        return;
+      }
+
+      if (studentError || !student || !hasStudentRole) {
+        setAccountLabel("");
+        setRole(null);
+        await supabase.auth.signOut();
+        if (mounted) window.location.replace("/auth");
+        return;
+      }
+
+      setAccountLabel(student.display_name);
+      setRole("student");
     });
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   // Mentor-wide alerts: SOS (call mentor) / error (AI severity=error) / warn (soft toast).
@@ -457,7 +504,7 @@ function MentorDesk() {
 
   const signOut = async () => {
     await supabase.auth.signOut();
-    navigate({ to: "/auth", search: { next: undefined }, replace: true });
+    navigate({ to: "/auth", search: { next: "/" }, replace: true });
   };
 
   return (
@@ -466,7 +513,7 @@ function MentorDesk() {
         studentCount={students.length}
         activeStudent={currentStudent}
         wsConnected={wsConnected}
-        userEmail={userEmail}
+        accountLabel={accountLabel}
         onSignOut={signOut}
         staleCount={staleStudents.length}
         role={role}
@@ -620,7 +667,7 @@ function TopBar({
   studentCount,
   activeStudent,
   wsConnected,
-  userEmail,
+  accountLabel,
   onSignOut,
   staleCount,
   role,
@@ -628,7 +675,7 @@ function TopBar({
   studentCount: number;
   activeStudent: Student | null;
   wsConnected: boolean;
-  userEmail: string;
+  accountLabel: string;
   onSignOut: () => void;
   staleCount?: number;
   role?: "mentor" | "student" | null;
@@ -682,9 +729,9 @@ function TopBar({
             {wsConnected ? "Realtime 已连接" : "连接中…"}
           </span>
         </span>
-        {userEmail && (
+        {accountLabel && (
           <span style={{ color: "var(--sidebar-muted)" }} className="hidden md:inline">
-            {userEmail}
+            {accountLabel}
           </span>
         )}
         {role === "student" && (
