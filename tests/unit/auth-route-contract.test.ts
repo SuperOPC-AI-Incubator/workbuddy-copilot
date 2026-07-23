@@ -43,6 +43,8 @@ describe("authentication route contract", () => {
     expect(changePasswordRoute).not.toContain("supabase.auth.updateUser");
     expect(changePasswordRoute).not.toMatch(/supabase\.rpc\s*\(/);
     expect(changePasswordRoute).toContain("safePostAuthPath");
+    expect(changePasswordRoute).toContain("supabase.auth.setSession");
+    expect(changePasswordRoute).not.toContain("supabase.auth.refreshSession");
     expect(changePasswordRoute).toMatch(
       /navigate\s*\(\s*\{\s*href:\s*safeNext,\s*replace:\s*true\s*\}\s*\)/,
     );

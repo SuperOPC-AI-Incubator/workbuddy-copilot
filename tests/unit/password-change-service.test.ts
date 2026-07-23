@@ -7,12 +7,19 @@ import {
 
 const userId = "10000000-0000-0000-0000-000000000103";
 const newPassword = "correct horse battery staple";
+const replacementSession = {
+  accessToken: "replacement-access-token",
+  refreshToken: "replacement-refresh-token",
+  expiresAt: 1_999_999_999,
+};
 
 type GatewayState = {
   authCalls: Array<{ userId: string; password: string }>;
   completionCalls: string[];
+  sessionCalls: Array<{ userId: string; password: string }>;
   failAuth?: boolean;
   failCompletion?: boolean;
+  failSession?: boolean;
 };
 
 function createGateway(state: GatewayState): PasswordChangeGateway {
@@ -29,6 +36,13 @@ function createGateway(state: GatewayState): PasswordChangeGateway {
         throw new Error(`database unavailable for ${actualUserId}`);
       }
     },
+    async createPasswordSession(actualUserId, password) {
+      state.sessionCalls.push({ userId: actualUserId, password });
+      if (state.failSession) {
+        throw new Error(`replacement session rejected secret: ${password}`);
+      }
+      return replacementSession;
+    },
   };
 }
 
@@ -37,7 +51,7 @@ afterEach(() => {
 });
 
 describe("password-change service", () => {
-  test("updates Auth before clearing the flag for the authenticated user", async () => {
+  test("updates Auth, clears the flag, then creates a replacement session", async () => {
     const events: string[] = [];
     const gateway: PasswordChangeGateway = {
       async updateAuthPassword(actualUserId) {
@@ -46,19 +60,24 @@ describe("password-change service", () => {
       async completePasswordChange(actualUserId) {
         events.push(`complete:${actualUserId}`);
       },
+      async createPasswordSession(actualUserId) {
+        events.push(`session:${actualUserId}`);
+        return replacementSession;
+      },
     };
     const changePassword = createPasswordChangeService(gateway);
 
     const result = await changePassword({ userId, newPassword });
 
-    expect(events).toEqual([`auth:${userId}`, `complete:${userId}`]);
-    expect(result).toEqual({ ok: true });
+    expect(events).toEqual([`auth:${userId}`, `complete:${userId}`, `session:${userId}`]);
+    expect(result).toEqual({ ok: true, session: replacementSession });
   });
 
   test("does not clear the flag when the Auth password update fails", async () => {
     const state: GatewayState = {
       authCalls: [],
       completionCalls: [],
+      sessionCalls: [],
       failAuth: true,
     };
     const changePassword = createPasswordChangeService(createGateway(state));
@@ -68,12 +87,14 @@ describe("password-change service", () => {
     );
 
     expect(state.completionCalls).toEqual([]);
+    expect(state.sessionCalls).toEqual([]);
   });
 
   test("uses only the authenticated context user ID for both operations", async () => {
     const state: GatewayState = {
       authCalls: [],
       completionCalls: [],
+      sessionCalls: [],
     };
     const changePassword = createPasswordChangeService(createGateway(state));
 
@@ -81,12 +102,14 @@ describe("password-change service", () => {
 
     expect(state.authCalls).toEqual([{ userId, password: newPassword }]);
     expect(state.completionCalls).toEqual([userId]);
+    expect(state.sessionCalls).toEqual([{ userId, password: newPassword }]);
   });
 
   test("maps a completion failure safely after Auth succeeds", async () => {
     const state: GatewayState = {
       authCalls: [],
       completionCalls: [],
+      sessionCalls: [],
       failCompletion: true,
     };
     const changePassword = createPasswordChangeService(createGateway(state));
@@ -97,6 +120,25 @@ describe("password-change service", () => {
 
     expect(state.authCalls).toHaveLength(1);
     expect(state.completionCalls).toEqual([userId]);
+    expect(state.sessionCalls).toEqual([]);
+  });
+
+  test("maps replacement-session failure without exposing the new password", async () => {
+    const state: GatewayState = {
+      authCalls: [],
+      completionCalls: [],
+      sessionCalls: [],
+      failSession: true,
+    };
+    const changePassword = createPasswordChangeService(createGateway(state));
+
+    await expect(changePassword({ userId, newPassword })).rejects.toThrow(
+      "密码已更新，请使用新密码重新登录。",
+    );
+
+    expect(state.authCalls).toHaveLength(1);
+    expect(state.completionCalls).toEqual([userId]);
+    expect(state.sessionCalls).toEqual([{ userId, password: newPassword }]);
   });
 
   test("never returns or logs the password or raw upstream errors", async () => {
@@ -109,6 +151,7 @@ describe("password-change service", () => {
     const successState: GatewayState = {
       authCalls: [],
       completionCalls: [],
+      sessionCalls: [],
     };
     const successfulChange = createPasswordChangeService(createGateway(successState));
 
@@ -120,6 +163,7 @@ describe("password-change service", () => {
     const failureState: GatewayState = {
       authCalls: [],
       completionCalls: [],
+      sessionCalls: [],
       failAuth: true,
     };
     const failedChange = createPasswordChangeService(createGateway(failureState));

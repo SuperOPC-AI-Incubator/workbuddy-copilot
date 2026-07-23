@@ -72,14 +72,17 @@ function ChangePasswordPage() {
 
     setBusy(true);
     try {
-      await changePasswordFn({
+      const changed = await changePasswordFn({
         data: {
           newPassword,
         },
       });
 
-      const { data: refreshed, error: refreshError } = await supabase.auth.refreshSession();
-      if (refreshError || !refreshed.session) {
+      const { error: sessionError } = await supabase.auth.setSession({
+        access_token: changed.session.accessToken,
+        refresh_token: changed.session.refreshToken,
+      });
+      if (sessionError) {
         await supabase.auth.signOut();
         await navigate({
           to: "/auth",
