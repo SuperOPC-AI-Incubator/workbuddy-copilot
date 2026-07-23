@@ -8,6 +8,7 @@ const root = process.cwd();
 const macInstaller = resolve(root, "connectors/install-macos.sh");
 const windowsInstaller = resolve(root, "connectors/install-windows.ps1");
 const connectorSource = resolve(root, "connectors/workbuddy-sync.mjs");
+const gitAttributes = resolve(root, ".gitattributes");
 const skillSource = resolve(root, "connectors/SKILL.md");
 const setupRoute = resolve(root, "src/routes/_authenticated/workbuddy.tsx");
 const mcpReachability = resolve(root, "src/lib/workbuddy/mcp-reachability.ts");
@@ -158,6 +159,12 @@ describe("fallback connector installers", () => {
     expect(await readFile(resolve(root, "SKILL.md"), "utf8")).toBe(
       await readFile(resolve(root, "connectors/SKILL.md"), "utf8"),
     );
+  });
+
+  test("keeps executable connector modules LF-only across Windows Git checkouts", async () => {
+    const attributes = await readFile(gitAttributes, "utf8").catch(() => "");
+    expect(attributes).toMatch(/^connectors\/workbuddy-sync\.mjs text eol=lf$/m);
+    expect(attributes).toMatch(/^public\/downloads\/workbuddy-sync\.mjs text eol=lf$/m);
   });
 });
 
