@@ -183,10 +183,9 @@ describe.skipIf(missingConfiguration !== null)(
               }),
           );
 
-          expect([first.error?.code ?? null, second.error?.code ?? null].sort()).toEqual([
-            null,
-            "P4090",
-          ]);
+          const errorCodes = [first.error?.code ?? null, second.error?.code ?? null];
+          expect(errorCodes.filter((code) => code === null)).toHaveLength(1);
+          expect(errorCodes.filter((code) => code === "P4090")).toHaveLength(1);
           const active = await firstClient
             .from("workbuddy_credentials")
             .select("token_hash", { count: "exact" })
