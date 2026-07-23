@@ -160,7 +160,7 @@ export function validateNegativeControlReport(report, control) {
 
   if (
     resultErrors.length !== 1 ||
-    (result?.error && errorMessage(result.error) !== errorMessage(resultErrors[0]))
+    (result?.error && assertionMarkerLine(result.error) !== assertionMarkerLine(resultErrors[0]))
   ) {
     throw new Error(
       `Negative control must contain exactly one target assertion error: ${control.mode}`,

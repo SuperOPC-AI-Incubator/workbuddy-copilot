@@ -157,6 +157,30 @@ describe("negative-control report contract", () => {
     expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).not.toThrow();
   });
 
+  test("accepts Playwright's concise and detailed views of the same marked assertion", () => {
+    const report = negativeControlReport([
+      `Error: ${SIGNUP_CONTROL.marker}\n\n${SIGNUP_CONTROL.marker}\ndetailed call log`,
+    ]);
+    report.suites[0].specs[0].tests[0].results[0].error = {
+      message: `Error: ${SIGNUP_CONTROL.marker}\n\n${SIGNUP_CONTROL.marker}\nconcise assertion`,
+    };
+
+    expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).not.toThrow();
+  });
+
+  test("rejects a primary error whose marker differs from its detailed assertion", () => {
+    const report = negativeControlReport([
+      `Error: ${SIGNUP_CONTROL.marker}\n\n${SIGNUP_CONTROL.marker}\ndetailed call log`,
+    ]);
+    report.suites[0].specs[0].tests[0].results[0].error = {
+      message: "Error: DIFFERENT_ASSERTION_MARKER\nconcise assertion",
+    };
+
+    expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).toThrow(
+      "exactly one target assertion error",
+    );
+  });
+
   test("rejects a target assertion failure followed by an afterEach cleanup error", () => {
     const report = negativeControlReport([
       `${SIGNUP_CONTROL.marker}\nassertion failure`,
