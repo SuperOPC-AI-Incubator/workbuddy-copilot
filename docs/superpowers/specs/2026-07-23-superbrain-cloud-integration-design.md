@@ -87,7 +87,7 @@ Team-owned Supabase Cloud
 
 - 导师不开放公开注册。
 - 登录页面接收用户名和密码，不要求真实邮箱。
-- 服务端把规范化用户名映射为内部 Supabase Auth 标识；内部标识不显示给导师。
+- 服务端把规范化用户名映射为带版本号的不可逆内部 Supabase Auth 标识；内部标识不显示给导师，也不作为管理 API 响应字段。
 - 首批预置 4 个已确认的导师用户名。初始密码只在建号时提交给 Supabase Auth，不写入设计文档、代码、migration、日志或项目环境文件。
 - 顶部导航和消息作者显示导师用户名，而不是内部邮箱标识。
 
@@ -119,7 +119,7 @@ Team-owned Supabase Cloud
 - `source`：mcp / skill / connector；
 - 可选的重试次数和客户端时间。
 
-服务端对 `event_id` 建唯一约束。客户端重复发送只返回原结果，不重复写时间线。
+服务端使用独立 ingest ledger 和原子数据库函数处理 `event_id`。同一个 `event_id` 与相同 payload 重试时返回第一次结果；同一个 `event_id` 搭配不同 payload 时返回冲突，不重复写时间线。
 
 ### 5.2 接入方式
 
@@ -131,7 +131,8 @@ Team-owned Supabase Cloud
 2. **Token Skill/连接器为降级**
    - 保留同事版一键接入体验。
    - 提供 Windows PowerShell 与 macOS/Linux 两套明确命令。
-   - 网络失败进行有限重试；仍失败时写入本地待发送队列，由后续轮次补传。
+   - 网络失败进行有限重试；仍失败时先写入项目目录外的本地原子待发送队列，由后续轮次补传。
+   - token 不嵌入 SKILL.md；连接器只从当前用户的受限配置读取。
    - 本地队列不进入项目目录，不被 Git 跟踪。
 
 ### 5.3 会话稳定性
@@ -165,6 +166,7 @@ Team-owned Supabase Cloud
 ### 6.3 Token/Skill 链路
 
 - 新增 Bearer token 保护的未读消息查询与 ack API。
+- token 明文只在创建或轮换时显示一次；服务端只保存 hash、前缀、状态和最近使用时间。
 - Windows/macOS 接入脚本使用相同协议。
 - API 返回结构化 JSON，不要求客户端解析网页。
 - 多次 GET 或 ACK 都必须幂等。
@@ -208,7 +210,7 @@ Team-owned Supabase Cloud
 - ingest、导师消息 fetch/ack、Realtime 订阅和 AI 调用分别统计成功率与延迟。
 - 导师端显示学员最后成功同步时间和未送达消息数量。
 - DeepSeek 不可用时，基础同步、导师查看和人工回复仍可工作；只降级 AI 草稿/诊断。
-- Supabase Realtime 不可用时，页面退化为定时刷新，不影响写入。
+- Supabase Realtime 不可用时，页面退化为有界定时刷新，不影响写入。
 - 腾讯云应用重启后，未读导师消息和已写入事件不丢失。
 
 ## 九、验证方案
