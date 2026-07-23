@@ -16,13 +16,13 @@
 
 ## Git 血缘事实
 
-| 检查项 | 已验证结果 | 含义 |
-|---|---|---|
-| 共同祖先 | 同事 `f86c689` 与原项目 `b4f6917`、原项目 `main` 均无 merge-base | 不是原项目分支，也不是可按共同祖先合并的 fork |
-| 根提交 | 同事仓库唯一根提交是 [b54a9d2](https://github.com/Jonas1mposter/superbrain-copilot/commit/b54a9d2b21df269aa84c49da7925cb3ecf72f4cc)，内容为 Lovable TanStack 模板；[模板元数据](https://github.com/Jonas1mposter/superbrain-copilot/blob/b54a9d2b21df269aa84c49da7925cb3ecf72f4cc/.lovable/project.json)也明确记录该模板 | 同事仓库不是从 WorkBuddy commit 起根 |
-| Git 对象交集 | 同事 HEAD 可达 667 个对象与原项目全部 refs 可达 1463 个对象的 SHA 交集为 0 | 没有完全相同的 commit、目录树或未改写文件内容 |
-| 文件树 | 两个 HEAD 分别有 117、148 个文件，仅 `.gitignore`、`AGENTS.md` 路径同名；导师台源码路径和技术栈完全不同 | 源码结构相似度低，不是目录级搬运 |
-| 同事历史 | `f86c689` 可达 129 个提交：1 个 Lovable 根提交、128 个 `gpt-engineer-app[bot]` 提交，其中 32 个 merge | 历史形态符合 Lovable 生成、分支合并后同步到 GitHub |
+| 检查项       | 已验证结果                                                                                                                                                                                                                                                                                                               | 含义                                               |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| 共同祖先     | 同事 `f86c689` 与原项目 `b4f6917`、原项目 `main` 均无 merge-base                                                                                                                                                                                                                                                         | 不是原项目分支，也不是可按共同祖先合并的 fork      |
+| 根提交       | 同事仓库唯一根提交是 [b54a9d2](https://github.com/Jonas1mposter/superbrain-copilot/commit/b54a9d2b21df269aa84c49da7925cb3ecf72f4cc)，内容为 Lovable TanStack 模板；[模板元数据](https://github.com/Jonas1mposter/superbrain-copilot/blob/b54a9d2b21df269aa84c49da7925cb3ecf72f4cc/.lovable/project.json)也明确记录该模板 | 同事仓库不是从 WorkBuddy commit 起根               |
+| Git 对象交集 | 同事 HEAD 可达 667 个对象与原项目全部 refs 可达 1463 个对象的 SHA 交集为 0                                                                                                                                                                                                                                               | 没有完全相同的 commit、目录树或未改写文件内容      |
+| 文件树       | 两个 HEAD 分别有 117、148 个文件，仅 `.gitignore`、`AGENTS.md` 路径同名；导师台源码路径和技术栈完全不同                                                                                                                                                                                                                  | 源码结构相似度低，不是目录级搬运                   |
+| 同事历史     | `f86c689` 可达 129 个提交：1 个 Lovable 根提交、128 个 `gpt-engineer-app[bot]` 提交，其中 32 个 merge                                                                                                                                                                                                                    | 历史形态符合 Lovable 生成、分支合并后同步到 GitHub |
 
 GitHub API 显示该仓库 [`fork=false`](https://api.github.com/repos/Jonas1mposter/superbrain-copilot)。这只表示 GitHub 没有登记 fork-network 关系；GitHub 的 [`fork` 字段](https://docs.github.com/en/rest/repos/repos#get-a-repository)不能证明代码或产品设计没有从外部仓库、文件或提示中导入。
 
@@ -51,11 +51,11 @@ GitHub API 显示该仓库 [`fork=false`](https://api.github.com/repos/Jonas1mpo
 
 这不是排他性的法证上界：`adf05fe` 是已识别到的最早完整特征组合，`220db52` 是同事复刻前包含同一契约的后续检查点。此后的多个后代提交继续保留这些特征，也可能成为输入，但仅凭现有语义签名无法进一步区分。
 
-| 本地提交 | 作用 | 判断 |
-|---|---|---|
-| [`e8e3861`](https://github.com/wangjialiang678/workbuddy-copilot/commit/e8e3861067ca5e0cfbd0abad9e1f9df57690dc64)¹ | 已具备三栏、四类时间线、导师出站消息和“不改 AI，仅提示学员” | 奠定导师台核心语义，但尚未覆盖全部独特签名 |
-| [`adf05fe`](https://github.com/wangjialiang678/workbuddy-copilot/commit/adf05fed163d69e3304ef7d1de8df46f305f8dc8)¹ | 增加“同步该学员全部对话”，并保留会话级完整原文入口 | **目前最佳单点候选**：最早覆盖同事 UI 的完整特征组合 |
-| [`220db52`](https://github.com/wangjialiang678/workbuddy-copilot/commit/220db5226f37d221d823598287e0d61cb49fd4e8)¹ | 包含上述完整契约的后续客户端检查点 | 同事复刻前的较晚候选快照，但不是排他性上界 |
+| 本地提交                                                                                                           | 作用                                                        | 判断                                                 |
+| ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- | ---------------------------------------------------- |
+| [`e8e3861`](https://github.com/wangjialiang678/workbuddy-copilot/commit/e8e3861067ca5e0cfbd0abad9e1f9df57690dc64)¹ | 已具备三栏、四类时间线、导师出站消息和“不改 AI，仅提示学员” | 奠定导师台核心语义，但尚未覆盖全部独特签名           |
+| [`adf05fe`](https://github.com/wangjialiang678/workbuddy-copilot/commit/adf05fed163d69e3304ef7d1de8df46f305f8dc8)¹ | 增加“同步该学员全部对话”，并保留会话级完整原文入口          | **目前最佳单点候选**：最早覆盖同事 UI 的完整特征组合 |
+| [`220db52`](https://github.com/wangjialiang678/workbuddy-copilot/commit/220db5226f37d221d823598287e0d61cb49fd4e8)¹ | 包含上述完整契约的后续客户端检查点                          | 同事复刻前的较晚候选快照，但不是排他性上界           |
 
 ¹ 原项目 GitHub 链接需要仓库权限；本地分别运行 `git show e8e3861`、`git show adf05fe`、`git show 220db52` 可复核。
 

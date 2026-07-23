@@ -55,6 +55,7 @@
 ## Task 1: Establish the product branch and quality baseline
 
 **Files:**
+
 - Modify: `package.json`
 - Modify: `vite.config.ts`
 - Modify: all files reported only by `prettier/prettier`
@@ -161,6 +162,7 @@ git commit -m "chore: establish cloud integration quality baseline"
 ## Task 2: Add deterministic mentor usernames and student-only signup
 
 **Files:**
+
 - Create: `src/lib/auth/identifiers.ts`
 - Create: `src/lib/auth/signin.server.ts`
 - Create: `src/lib/auth/signin.functions.ts`
@@ -236,7 +238,6 @@ export function loginIdentifierToEmail(value: string): string {
   const normalized = value.trim().toLowerCase();
   return normalized.includes("@") ? normalized : mentorUsernameToEmail(normalized);
 }
-
 ```
 
 - [ ] **Step 4: Make signup student-only and signin username-aware**
@@ -268,6 +269,7 @@ git commit -m "feat: add username mentor login"
 ## Task 3: Extend the Supabase schema for team administration and reliable delivery
 
 **Files:**
+
 - Create: `supabase/migrations/20260723090000_add_team_admin_role.sql`
 - Create: `supabase/migrations/20260723090100_cloud_integration.sql`
 - Modify: `src/integrations/supabase/types.ts`
@@ -414,6 +416,7 @@ git commit -m "feat: add reliable delivery schema"
 ## Task 4: Implement trusted mentor account administration
 
 **Files:**
+
 - Create: `src/lib/auth/admin.server.ts`
 - Create: `src/lib/auth/admin.functions.ts`
 - Create: `src/routes/_authenticated/admin.mentors.tsx`
@@ -442,7 +445,9 @@ export interface MentorAuthGateway {
     appMetadata: { account_kind: "staff" };
   }): Promise<{ id: string }>;
   updateUser(id: string, input: { password?: string; banDuration?: string }): Promise<void>;
-  listUsers(): Promise<Array<{ id: string; email: string; lastSignInAt: string | null; bannedUntil: string | null }>>;
+  listUsers(): Promise<
+    Array<{ id: string; email: string; lastSignInAt: string | null; bannedUntil: string | null }>
+  >;
 }
 ```
 
@@ -474,6 +479,7 @@ git commit -m "feat: add team-managed mentor accounts"
 ## Task 5: Make WorkBuddy ingest idempotent and session-stable
 
 **Files:**
+
 - Create: `src/lib/workbuddy/contracts.ts`
 - Create: `src/lib/workbuddy/events.server.ts`
 - Create: `src/lib/workbuddy/credentials.server.ts`
@@ -536,6 +542,7 @@ git commit -m "feat: make workbuddy ingest idempotent"
 ## Task 6: Add persistent mentor fetch and acknowledgement
 
 **Files:**
+
 - Create: `src/lib/workbuddy/delivery.server.ts`
 - Modify: `src/lib/workbuddy/credentials.server.ts`
 - Create: `src/lib/workbuddy/credentials.functions.ts`
@@ -603,6 +610,7 @@ git commit -m "feat: add reliable mentor message delivery"
 ## Task 7: Add MCP pull/ack tools and enforce the closed loop
 
 **Files:**
+
 - Create: `src/lib/mcp/tools/get-unread-mentor-messages.ts`
 - Create: `src/lib/mcp/tools/ack-mentor-messages.ts`
 - Modify: `src/lib/mcp/index.ts`
@@ -643,6 +651,7 @@ git commit -m "feat: close mentor loop through mcp"
 ## Task 8: Add Windows and macOS fallback connectors
 
 **Files:**
+
 - Create: `connectors/workbuddy-sync.mjs`
 - Create: `connectors/install-macos.sh`
 - Create: `connectors/install-windows.ps1`
@@ -707,6 +716,7 @@ git commit -m "feat: add cross-platform workbuddy fallback"
 ## Task 9: Expose delivery status in mentor and student web experiences
 
 **Files:**
+
 - Modify: `src/routes/_authenticated/index.tsx`
 - Create: `src/lib/timeline-delivery.ts`
 - Create: `src/lib/mentor-messages.server.ts`
@@ -757,6 +767,7 @@ git commit -m "feat: surface mentor delivery status"
 ## Task 10: Add browser E2E and multi-OS CI
 
 **Files:**
+
 - Create: `tests/e2e/auth-and-mentor.spec.ts`
 - Create: `tests/e2e/workbuddy-loop.spec.ts`
 - Create: `.github/workflows/ci.yml`
@@ -814,6 +825,7 @@ git commit -m "test: add cloud loop and multi-os verification"
 ## Task 11: Add Tencent deployment and rollback assets
 
 **Files:**
+
 - Create: `.env.example`
 - Create: `src/routes/api/health.ts`
 - Create: `src/routes/api/ready.ts`
@@ -883,6 +895,7 @@ git commit -m "ops: add tencent deployment and rollback"
 ## Task 12: Provision team Supabase and initial accounts
 
 **Files:**
+
 - Modify only deployment state; do not commit secrets.
 - Append verification evidence to `docs/deployment.md` without credentials.
 
@@ -909,6 +922,7 @@ Run migrations/tests against an isolated test student and verify no credential i
 ## Task 13: Deploy to Tencent Cloud and run the live closed loop
 
 **Files:**
+
 - Server-side release and Nginx configuration only.
 - Update: `docs/deployment.md` with non-secret evidence.
 
@@ -949,6 +963,7 @@ Record exact pass/fail output and clearly separate CI evidence from unavailable 
 ## Task 14: Review, document, and push the public branch
 
 **Files:**
+
 - Add: approved design and this plan under `docs/superpowers/`
 - Update: `README.md`
 - Update: `docs/deployment.md`
