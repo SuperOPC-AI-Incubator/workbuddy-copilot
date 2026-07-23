@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(125);
+SELECT plan(126);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -83,6 +83,33 @@ SELECT ok(
     )
   ),
   'trusted staff Auth creation skips student provisioning'
+);
+
+INSERT INTO auth.users (
+  id,
+  email,
+  raw_user_meta_data,
+  raw_app_meta_data
+)
+VALUES (
+  '10000000-0000-0000-0000-000000000105'::uuid,
+  'u1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@auth.copilot.sg.superbrain-ai.com',
+  '{"display_name":"Provider Intermediate State","role":"student"}'::jsonb,
+  '{}'::jsonb
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1
+    FROM public.user_roles
+    WHERE user_id = '10000000-0000-0000-0000-000000000105'::uuid
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM public.students
+    WHERE user_id = '10000000-0000-0000-0000-000000000105'::uuid
+  ),
+  'deterministic internal staff identity skips student provisioning before app metadata persists'
 );
 
 INSERT INTO auth.users (id, email, raw_app_meta_data)

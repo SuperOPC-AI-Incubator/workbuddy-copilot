@@ -6,6 +6,10 @@ import { Constants, type Database, type Json } from "@/integrations/supabase/typ
 const migrationsDirectory = resolve(process.cwd(), "supabase/migrations");
 const roleMigrationPath = resolve(migrationsDirectory, "20260723090000_add_team_admin_role.sql");
 const cloudMigrationPath = resolve(migrationsDirectory, "20260723090100_cloud_integration.sql");
+const staffAuthCompatibilityMigrationPath = resolve(
+  migrationsDirectory,
+  "20260724000000_staff_auth_provider_compat.sql",
+);
 const deliveryMigrationPath = resolve(migrationsDirectory, "20260723090300_reliable_delivery.sql");
 const mentorSendMigrationPath = resolve(
   migrationsDirectory,
@@ -21,6 +25,7 @@ const mentorDeskPath = resolve(process.cwd(), "src/routes/_authenticated/index.t
 
 const roleMigration = readFileSync(roleMigrationPath, "utf8");
 const cloudMigration = readFileSync(cloudMigrationPath, "utf8");
+const staffAuthCompatibilityMigration = readFileSync(staffAuthCompatibilityMigrationPath, "utf8");
 const deliveryMigration = readFileSync(deliveryMigrationPath, "utf8");
 const mentorSendMigration = readFileSync(mentorSendMigrationPath, "utf8");
 const generatedTypes = readFileSync(generatedTypesPath, "utf8");
@@ -723,10 +728,13 @@ describe("cloud integration schema contract", () => {
   });
 
   test("prevents signup metadata from promoting a public user", () => {
-    const handler = functionDefinition(cloudMigration, "handle_new_user");
+    const handler = functionDefinition(staffAuthCompatibilityMigration, "handle_new_user");
 
     expect(handler).toMatch(
       /raw_app_meta_data\s*->>\s*'account_kind'\s*=\s*'staff'[\s\S]*?RETURN\s+NEW/i,
+    );
+    expect(handler).toMatch(
+      /NEW\.email\s*~\s*'\^u1_\[A-Za-z0-9_-\]\{43\}@auth\\\.copilot\\\.sg\\\.superbrain-ai\\\.com\$'[\s\S]*?RETURN\s+NEW/,
     );
     expect(handler).not.toMatch(/raw_user_meta_data\s*->>\s*'role'/i);
     expect(handler).toMatch(
@@ -1216,7 +1224,7 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*125\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*126\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);
@@ -1243,5 +1251,7 @@ describe("cloud integration schema contract", () => {
   test("does not contain destructive data operations", () => {
     expect(cloudMigration).not.toMatch(/\bDELETE\s+FROM\b/i);
     expect(cloudMigration).not.toMatch(/\bTRUNCATE\b/i);
+    expect(staffAuthCompatibilityMigration).not.toMatch(/\bDELETE\s+FROM\b/i);
+    expect(staffAuthCompatibilityMigration).not.toMatch(/\bTRUNCATE\b/i);
   });
 });
