@@ -95,7 +95,7 @@ export async function loginWithPassword(
   await page.goto("/auth");
   await page.getByLabel("用户名或学员邮箱").fill(identifier);
   await page.getByLabel("密码").fill(password);
-  await page.getByRole("button", { name: "登录" }).click();
+  await page.locator("form").getByRole("button", { name: "登录", exact: true }).click();
   await page.waitForURL((url) => url.pathname !== "/auth");
 }
 

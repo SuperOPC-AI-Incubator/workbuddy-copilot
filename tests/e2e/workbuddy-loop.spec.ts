@@ -9,6 +9,17 @@ import {
 
 const MISSING_MESSAGE_ID = "00000000-0000-4000-8000-000000000404";
 
+type DeliveredMentorMessage = {
+  id: string;
+  session_id: string;
+  text: string;
+  author_username: string;
+  created_at: string;
+  fetch_count: number;
+  first_fetched_at: string;
+  last_fetched_at: string;
+};
+
 test.describe("WorkBuddy cloud delivery loop", () => {
   test.skip(!E2E_ENVIRONMENT.available, E2E_ENVIRONMENT.skipReason);
   test.describe.configure({ mode: "serial", timeout: 120_000 });
@@ -137,9 +148,12 @@ test.describe("WorkBuddy cloud delivery loop", () => {
       ],
       next_cursor: null,
     });
-    const messageId = String((firstFetch.body.messages as Array<{ id: string }>)[0]?.id);
+    const firstMessages = firstFetch.body.messages as DeliveredMentorMessage[];
+    expect(firstMessages).toHaveLength(1);
+    expect(firstMessages[0]?.fetch_count).toBe(1);
+    const messageId = String(firstMessages[0]?.id);
     expect(
-      (firstFetch.body.messages as Array<{ id: string }>).map(({ id }) => id),
+      firstMessages.map(({ id }) => id),
       negativeMarker,
     ).toContain(negativeControl ? MISSING_MESSAGE_ID : messageId);
 
@@ -148,7 +162,21 @@ test.describe("WorkBuddy cloud delivery loop", () => {
       { method: "GET", token: student.token },
     );
     expect(repeatedFetch.status).toBe(200);
-    expect(repeatedFetch.body.messages).toEqual(firstFetch.body.messages);
+    const repeatedMessages = repeatedFetch.body.messages as DeliveredMentorMessage[];
+    expect(repeatedMessages).toHaveLength(1);
+    expect(repeatedMessages[0]).toMatchObject({
+      id: firstMessages[0]?.id,
+      session_id: firstMessages[0]?.session_id,
+      text: firstMessages[0]?.text,
+      author_username: firstMessages[0]?.author_username,
+      created_at: firstMessages[0]?.created_at,
+      fetch_count: 2,
+      first_fetched_at: firstMessages[0]?.first_fetched_at,
+      last_fetched_at: expect.any(String),
+    });
+    expect(Date.parse(repeatedMessages[0]!.last_fetched_at)).toBeGreaterThanOrEqual(
+      Date.parse(firstMessages[0]!.last_fetched_at),
+    );
 
     const wrongStudentFetch = await harness.publicJson(
       `/api/public/workbuddy/mentor-messages?session_id=${sessionId}`,

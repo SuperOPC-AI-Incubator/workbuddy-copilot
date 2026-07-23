@@ -81,12 +81,13 @@ test.describe("authentication and mentor administration", () => {
     await expect(page).toHaveURL(/\/auth(?:\?|$)/);
     await page.getByLabel("用户名或学员邮箱").fill(mentor.username);
     await page.getByLabel("密码").fill(harness.initialPassword);
-    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await page.locator("form").getByRole("button", { name: "登录", exact: true }).click();
     await expect(page.getByText("账号或密码错误", { exact: true })).toBeVisible();
     await expect(page).toHaveURL(/\/auth(?:\?|$)/);
 
     await page.getByLabel("密码").fill(harness.newPassword);
-    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await page.locator("form").getByRole("button", { name: "登录", exact: true }).click();
+    await page.waitForURL((url) => url.pathname !== "/auth");
     await expect(page, negativeMarker).toHaveURL(negativeControl ? /\/auth(?:\?|$)/ : /\/$/);
   });
 
@@ -111,7 +112,7 @@ test.describe("authentication and mentor administration", () => {
 
     await loginWithPassword(page, admin.username, harness.initialPassword);
     await page.goto("/admin/mentors");
-    await expect(page.getByRole("heading", { name: "导师账号" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "导师账号", exact: true })).toBeVisible();
 
     await page.getByLabel("用户名").fill(managedUsername);
     await page.getByLabel("临时密码").fill(harness.initialPassword);
