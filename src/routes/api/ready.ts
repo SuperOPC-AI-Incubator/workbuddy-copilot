@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 
+import { applySupabaseApiKeyHeaders } from "@/integrations/supabase/api-key-headers";
+
 const DEFAULT_READY_TIMEOUT_MS = 2_500;
 
 type ReadyProbeConfig = {
@@ -44,6 +46,24 @@ function supabaseReadUrl(rawUrl: string | undefined): URL | null {
   }
 }
 
+async function consumeResponseBody(
+  response: Response,
+  setActiveReader: (reader: ReadableStreamDefaultReader<Uint8Array> | undefined) => void,
+): Promise<void> {
+  if (!response.body) return;
+
+  const reader = response.body.getReader();
+  setActiveReader(reader);
+  try {
+    while (!(await reader.read()).done) {
+      // Consume the one-row readiness response without retaining its contents.
+    }
+  } finally {
+    setActiveReader(undefined);
+    reader.releaseLock();
+  }
+}
+
 export async function createReadyResponse(config: ReadyProbeConfig): Promise<Response> {
   const readUrl = supabaseReadUrl(config.supabaseUrl);
   const serviceRoleKey = config.serviceRoleKey?.trim();
@@ -59,29 +79,42 @@ export async function createReadyResponse(config: ReadyProbeConfig): Promise<Res
   }
 
   const abortController = new AbortController();
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(() => {
       abortController.abort();
+      void activeReader?.cancel("readiness dependency timeout").catch(() => undefined);
       reject(new Error("readiness dependency timeout"));
     }, timeoutMs);
   });
 
   try {
+    const headers = applySupabaseApiKeyHeaders(
+      new Headers({ Accept: "application/json" }),
+      serviceRoleKey,
+    );
     const response = await Promise.race([
       (config.fetchImpl ?? fetch)(readUrl, {
         method: "GET",
         cache: "no-store",
-        headers: {
-          Accept: "application/json",
-          apikey: serviceRoleKey,
-          Authorization: `Bearer ${serviceRoleKey}`,
-        },
+        headers,
         signal: abortController.signal,
       }),
       timeoutPromise,
     ]);
-    return response.ok ? json({ status: "ready" }, 200) : dependencyUnavailable();
+    if (!response.ok) {
+      await Promise.race([response.body?.cancel() ?? Promise.resolve(), timeoutPromise]);
+      return dependencyUnavailable();
+    }
+
+    await Promise.race([
+      consumeResponseBody(response, (reader) => {
+        activeReader = reader;
+      }),
+      timeoutPromise,
+    ]);
+    return json({ status: "ready" }, 200);
   } catch {
     return dependencyUnavailable();
   } finally {

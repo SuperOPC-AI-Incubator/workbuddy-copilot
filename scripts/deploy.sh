@@ -8,6 +8,8 @@ WAIT_ATTEMPTS="${DEPLOY_WAIT_ATTEMPTS:-30}"
 WAIT_INTERVAL_SECONDS="${DEPLOY_WAIT_INTERVAL_SECONDS:-2}"
 CURRENT_LINK="$APP_ROOT/current"
 NEXT_LINK="$APP_ROOT/.current.next.$$"
+LOCK_FILE="$APP_ROOT/.deploy.lock"
+LOCK_ACQUIRED=0
 
 fail() {
   printf 'deploy failed: %s\n' "$*" >&2
@@ -18,8 +20,13 @@ cleanup() {
   if [[ -L "$NEXT_LINK" ]]; then
     rm -f "$NEXT_LINK"
   fi
+  if [[ "$LOCK_ACQUIRED" == "1" ]]; then
+    flock -u 9 || true
+  fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if (($# != 1)); then
   fail "usage: scripts/deploy.sh /opt/superbrain-copilot/releases/RELEASE_ID"
@@ -49,6 +56,13 @@ RELEASE_ID="$(basename "$RELEASE_DIR")"
 command -v bun >/dev/null 2>&1 || fail "Bun is not installed"
 command -v curl >/dev/null 2>&1 || fail "curl is not installed"
 command -v node >/dev/null 2>&1 || fail "Node.js is not installed"
+command -v flock >/dev/null 2>&1 || fail "flock is not installed"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  fail "another deployment is already running"
+fi
+LOCK_ACQUIRED=1
 
 if [[ -e "$CURRENT_LINK" && ! -L "$CURRENT_LINK" ]]; then
   fail "$CURRENT_LINK must be a symlink"

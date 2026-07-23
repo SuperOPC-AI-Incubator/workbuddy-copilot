@@ -9,11 +9,9 @@ User=deploy
 Group=deploy
 WorkingDirectory=/opt/superbrain-copilot/current
 Environment=NODE_ENV=production
-Environment=HOST=127.0.0.1
-Environment=PORT=3410
 EnvironmentFile=/etc/superbrain-copilot.env
 EnvironmentFile=/opt/superbrain-copilot/current/.release.env
-ExecStart=/usr/bin/node /opt/superbrain-copilot/current/.output/server/index.mjs
+ExecStart=/usr/bin/env HOST=127.0.0.1 PORT=3410 /usr/bin/node /opt/superbrain-copilot/current/.output/server/index.mjs
 Restart=on-failure
 RestartSec=3
 TimeoutStartSec=30

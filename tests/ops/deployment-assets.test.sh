@@ -50,6 +50,12 @@ if [[ "$*" == "run build" ]]; then
   mkdir -p .output/server
   printf 'export default {};\n' >.output/server/index.mjs
 fi
+if [[ "$*" == "install --frozen-lockfile" && -n "${FAKE_BUN_BLOCK_STARTED:-}" ]]; then
+  : >"$FAKE_BUN_BLOCK_STARTED"
+  while [[ ! -e "${FAKE_BUN_BLOCK_RELEASE:?}" ]]; do
+    sleep 0.02
+  done
+fi
 EOF
 
   cat >"$bin_dir/systemctl" <<'EOF'
@@ -136,7 +142,23 @@ if [[ -n "$write_format" ]]; then
 fi
 EOF
 
-  chmod +x "$bin_dir/bun" "$bin_dir/systemctl" "$bin_dir/curl"
+  cat >"$bin_dir/flock" <<'EOF'
+#!/usr/bin/env python3
+import fcntl
+import sys
+
+if sys.argv[1:] == ["-n", "9"]:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(1)
+elif sys.argv[1:] == ["-u", "9"]:
+    fcntl.flock(9, fcntl.LOCK_UN)
+else:
+    raise SystemExit(2)
+EOF
+
+  chmod +x "$bin_dir/bun" "$bin_dir/systemctl" "$bin_dir/curl" "$bin_dir/flock"
 }
 
 test_static_contracts() {
@@ -151,9 +173,10 @@ test_static_contracts() {
   assert_contains "$SERVICE_UNIT" "Group=deploy"
   assert_contains "$SERVICE_UNIT" "EnvironmentFile=/etc/superbrain-copilot.env"
   assert_contains "$SERVICE_UNIT" "EnvironmentFile=/opt/superbrain-copilot/current/.release.env"
-  assert_contains "$SERVICE_UNIT" "Environment=HOST=127.0.0.1"
-  assert_contains "$SERVICE_UNIT" "Environment=PORT=3410"
-  assert_contains "$SERVICE_UNIT" "ExecStart=/usr/bin/node /opt/superbrain-copilot/current/.output/server/index.mjs"
+  assert_not_contains "$SERVICE_UNIT" "Environment=HOST="
+  assert_not_contains "$SERVICE_UNIT" "Environment=PORT="
+  assert_contains "$SERVICE_UNIT" \
+    "ExecStart=/usr/bin/env HOST=127.0.0.1 PORT=3410 /usr/bin/node /opt/superbrain-copilot/current/.output/server/index.mjs"
   assert_contains "$SERVICE_UNIT" "Restart=on-failure"
   assert_contains "$SERVICE_UNIT" "NoNewPrivileges=true"
   assert_contains "$SERVICE_UNIT" "ProtectSystem=strict"
@@ -189,6 +212,20 @@ test_static_contracts() {
   assert_contains "$DEPLOYMENT_DOC" "workbuddy-copilot.service"
   assert_contains "$DEPLOYMENT_DOC" "8765"
   assert_contains "$DEPLOYMENT_DOC" "never"
+}
+
+test_systemd_binding_cannot_be_overridden() {
+  local hostile_port
+  for hostile_port in "" "9999"; do
+    local observed
+    observed="$(
+      HOST="0.0.0.0" PORT="$hostile_port" \
+        /usr/bin/env HOST=127.0.0.1 PORT=3410 \
+        /bin/sh -c 'printf "%s|%s" "$HOST" "$PORT"'
+    )"
+    assert_eq "$observed" "127.0.0.1|3410" \
+      "ExecStart binding with EnvironmentFile PORT='$hostile_port'"
+  done
 }
 
 test_tracked_env_is_secret_free() {
@@ -313,6 +350,70 @@ test_deploy_requires_exact_ready_status() {
     "status failure rollback symlink"
 }
 
+test_concurrent_deploy_fails_before_side_effects_and_releases_lock() {
+  local test_root="$1"
+  local app_root="$test_root/concurrent app"
+  local old_release="$app_root/releases/old-release"
+  local new_release="$app_root/releases/new-release"
+  local fake_bin="$test_root/concurrent-bin"
+  local ops_log="$test_root/concurrent.log"
+  local first_started="$test_root/first-install-started"
+  local release_first="$test_root/release-first-install"
+  local first_pid
+
+  mkdir -p "$old_release/.output/server" "$new_release"
+  printf '{}\n' >"$new_release/package.json"
+  printf 'old\n' >"$old_release/.output/server/index.mjs"
+  ln -s "$old_release" "$app_root/current"
+  : >"$ops_log"
+  make_fake_toolchain "$fake_bin"
+
+  PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" APP_ROOT="$app_root" \
+    DEPLOY_NO_SUDO=1 DEPLOY_WAIT_ATTEMPTS=1 DEPLOY_WAIT_INTERVAL_SECONDS=0 \
+    FAKE_HEALTH_RELEASE_ID="new-release" \
+    FAKE_BUN_BLOCK_STARTED="$first_started" FAKE_BUN_BLOCK_RELEASE="$release_first" \
+    "$DEPLOY_SCRIPT" "$new_release" >"$test_root/first-deploy.out" 2>&1 &
+  first_pid=$!
+
+  local attempts=0
+  while [[ ! -e "$first_started" && "$attempts" -lt 100 ]]; do
+    sleep 0.02
+    attempts=$((attempts + 1))
+  done
+  if [[ ! -e "$first_started" ]]; then
+    : >"$release_first"
+    wait "$first_pid" || true
+    fail "first deployment never reached its install step"
+  fi
+
+  local side_effect_count_before
+  side_effect_count_before="$(grep -Ec '^(bun|systemctl)\|' "$ops_log" || true)"
+  set +e
+  PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" APP_ROOT="$app_root" \
+    DEPLOY_NO_SUDO=1 DEPLOY_WAIT_ATTEMPTS=1 DEPLOY_WAIT_INTERVAL_SECONDS=0 \
+    FAKE_HEALTH_RELEASE_ID="new-release" \
+    "$DEPLOY_SCRIPT" "$new_release" >"$test_root/second-deploy.out" 2>&1
+  local second_status=$?
+  set -e
+  local side_effect_count_after
+  side_effect_count_after="$(grep -Ec '^(bun|systemctl)\|' "$ops_log" || true)"
+
+  : >"$release_first"
+  wait "$first_pid"
+
+  [[ "$second_status" -ne 0 ]] ||
+    fail "a concurrent deployment was allowed to install or publish"
+  assert_eq "$side_effect_count_after" "$side_effect_count_before" \
+    "concurrent deployment side-effect count"
+  assert_contains "$test_root/second-deploy.out" "another deployment is already running"
+
+  PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" APP_ROOT="$app_root" \
+    DEPLOY_NO_SUDO=1 DEPLOY_WAIT_ATTEMPTS=1 DEPLOY_WAIT_INTERVAL_SECONDS=0 \
+    FAKE_HEALTH_RELEASE_ID="new-release" \
+    "$DEPLOY_SCRIPT" "$new_release" >"$test_root/third-deploy.out" 2>&1 ||
+    fail "deployment lock was not released by the exit trap"
+}
+
 test_healthcheck_exact_status_contract() {
   local test_root="$1"
   local fake_bin="$test_root/health-bin"
@@ -343,16 +444,24 @@ test_healthcheck_exact_status_contract() {
 }
 
 main() {
-  test_tracked_env_is_secret_free
-  test_static_contracts
-
   TEST_ROOT="$(mktemp -d)"
   trap 'rm -rf "$TEST_ROOT"' EXIT
+
+  if [[ "${1:-}" == "concurrency" ]]; then
+    test_concurrent_deploy_fails_before_side_effects_and_releases_lock "$TEST_ROOT"
+    printf 'deployment concurrency test passed\n'
+    return
+  fi
+
+  test_tracked_env_is_secret_free
+  test_static_contracts
+  test_systemd_binding_cannot_be_overridden
 
   test_deploy_requires_explicit_release "$TEST_ROOT"
   test_successful_atomic_deploy_with_quoted_paths "$TEST_ROOT"
   test_failed_verification_rolls_back_without_deleting_releases "$TEST_ROOT"
   test_deploy_requires_exact_ready_status "$TEST_ROOT"
+  test_concurrent_deploy_fails_before_side_effects_and_releases_lock "$TEST_ROOT"
   test_healthcheck_exact_status_contract "$TEST_ROOT"
   printf 'deployment asset tests passed\n'
 }

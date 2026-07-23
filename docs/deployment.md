@@ -22,12 +22,14 @@ the first release:
    Confirm `bun --version` prints exactly `1.3.10`.
 2. Confirm `/usr/bin/node` is Node.js 22.22 or the tested Node 22 maintenance
    release.
-3. Create `/opt/superbrain-copilot/releases` owned by `deploy:deploy`. Keep
+3. Confirm the Ubuntu `util-linux` package provides `flock`; the deploy script
+   uses it for a non-blocking process lock.
+4. Create `/opt/superbrain-copilot/releases` owned by `deploy:deploy`. Keep
    every release directory after deployment; cleanup is a separate, reviewed
    operation.
-4. Install the systemd and Nginx templates from `deploy/`. Validate Nginx with
+5. Install the systemd and Nginx templates from `deploy/`. Validate Nginx with
    `sudo nginx -t` before reloading it.
-5. Obtain a TLS certificate for `copilot.sg.superbrain-ai.com` and redirect
+6. Obtain a TLS certificate for `copilot.sg.superbrain-ai.com` and redirect
    HTTP to HTTPS after the initial ACME challenge succeeds.
 
 The site template preserves WebSocket upgrades and disables response/request
@@ -40,9 +42,11 @@ templates. They are not deployment configuration and must remain secret-free.
 
 Create `/etc/superbrain-copilot.env` directly on the server, owned by
 `root:deploy` with mode `0640`. Populate the variables listed in
-`.env.example`; do not copy the file back into Git or a release. The service
-adds `HOST=127.0.0.1` and `PORT=3410`. Each immutable release also receives a
-non-secret `.release.env` containing only its validated release id.
+`.env.example`; do not copy the file back into Git or a release. The systemd
+`ExecStart` command sets `HOST=127.0.0.1` and `PORT=3410` after every
+EnvironmentFile has been read, so blank or conflicting `HOST`/`PORT` entries
+cannot change the listener. Each immutable release also receives a non-secret
+`.release.env` containing only its validated release id.
 
 ## First-time service setup
 
@@ -78,7 +82,8 @@ The script installs from the frozen lockfile, runs the complete check, builds
 the Node output, and only then atomically changes the `current` symlink. It
 restarts only `superbrain-copilot.service`, verifies that `/api/health`
 identifies the requested release, and requires `/api/ready` to return exactly
-HTTP 200.
+HTTP 200. A second deploy attempt fails before install, symlink, or service
+side effects while another deploy process holds `/opt/superbrain-copilot/.deploy.lock`.
 
 Run the public post-deployment contract after TLS is active:
 
