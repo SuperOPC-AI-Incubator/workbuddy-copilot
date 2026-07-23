@@ -154,6 +154,9 @@ describe("cloud integration schema contract", () => {
 
   test("keeps every Task 3 generated type shape exact", () => {
     expectTypeOf<Database["public"]["Tables"]["staff_accounts"]["Row"]>().toEqualTypeOf<{
+      active_operation_desired: boolean | null;
+      active_operation_token: string | null;
+      active_state_version: number;
       auth_identity_version: number;
       created_at: string;
       created_by: string | null;
@@ -162,11 +165,16 @@ describe("cloud integration schema contract", () => {
       is_active: boolean;
       must_change_password: boolean;
       normalized_username: string;
+      password_reset_operation_token: string | null;
+      password_reset_previous_must_change: boolean | null;
       updated_at: string;
       user_id: string;
       username: string;
     }>();
     expectTypeOf<Database["public"]["Tables"]["staff_accounts"]["Insert"]>().toEqualTypeOf<{
+      active_operation_desired?: boolean | null;
+      active_operation_token?: string | null;
+      active_state_version?: number;
       auth_identity_version?: number;
       created_at?: string;
       created_by?: string | null;
@@ -175,11 +183,16 @@ describe("cloud integration schema contract", () => {
       is_active?: boolean;
       must_change_password?: boolean;
       normalized_username: string;
+      password_reset_operation_token?: string | null;
+      password_reset_previous_must_change?: boolean | null;
       updated_at?: string;
       user_id: string;
       username: string;
     }>();
     expectTypeOf<Database["public"]["Tables"]["staff_accounts"]["Update"]>().toEqualTypeOf<{
+      active_operation_desired?: boolean | null;
+      active_operation_token?: string | null;
+      active_state_version?: number;
       auth_identity_version?: number;
       created_at?: string;
       created_by?: string | null;
@@ -188,6 +201,8 @@ describe("cloud integration schema contract", () => {
       is_active?: boolean;
       must_change_password?: boolean;
       normalized_username?: string;
+      password_reset_operation_token?: string | null;
+      password_reset_previous_must_change?: boolean | null;
       updated_at?: string;
       user_id?: string;
       username?: string;
@@ -373,7 +388,16 @@ describe("cloud integration schema contract", () => {
     expectTypeOf<Database["public"]["Functions"]["provision_staff_account"]>().toEqualTypeOf<{
       Args: {
         _auth_identity_version?: number;
-        _created_by?: string | null;
+        _created_by: string;
+        _is_team_admin?: boolean;
+        _user_id: string;
+        _username: string;
+      };
+      Returns: Json;
+    }>();
+    expectTypeOf<Database["public"]["Functions"]["bootstrap_staff_account"]>().toEqualTypeOf<{
+      Args: {
+        _auth_identity_version?: number;
         _is_team_admin?: boolean;
         _user_id: string;
         _username: string;
@@ -588,6 +612,7 @@ describe("cloud integration schema contract", () => {
       "get_my_legacy_workbuddy_setup",
     ];
     const serviceInvokerFunctions = [
+      "bootstrap_staff_account",
       "provision_staff_account",
       "complete_staff_password_change",
       "ingest_workbuddy_turn",
@@ -669,6 +694,7 @@ describe("cloud integration schema contract", () => {
     expect(signature).toMatch(/\b_user_id\s+uuid\b/i);
     expect(signature).toMatch(/\b_username\s+text\b/i);
     expect(signature).toMatch(/\b_auth_identity_version\s+integer\b/i);
+    expect(signature).toMatch(/\b_created_by\s+uuid\b(?!\s+DEFAULT)/i);
     expect(signature).toMatch(/\b_is_team_admin\s+boolean\b/i);
     expect(signature).not.toMatch(/\b_role\s+public\.app_role\b/i);
     expect(provisioner).toMatch(
@@ -676,6 +702,12 @@ describe("cloud integration schema contract", () => {
     );
     expect(provisioner).toMatch(/\b_username\s*!~\s*'\^\[a-z0-9\]\[a-z0-9\._-\]\{1,31\}\$'/i);
     expect(provisioner).toMatch(/\b_auth_identity_version\s*<>\s*1\b/i);
+    expect(provisioner).toMatch(
+      /actor\.user_id\s*=\s*_created_by[\s\S]*?actor\.is_active\s*=\s*true[\s\S]*?actor\.must_change_password\s*=\s*false[\s\S]*?'team_admin'::public\.app_role/i,
+    );
+    expect(cloudMigration).toMatch(
+      /CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.bootstrap_staff_account[\s\S]*?REVOKE\s+ALL[\s\S]*?GRANT\s+EXECUTE[\s\S]*?TO\s+service_role/i,
+    );
     expect(provisioner).not.toMatch(/derived_normalized_username\s*:=\s*pg_catalog\.lower/i);
     expect(provisioner).toMatch(
       /INSERT\s+INTO\s+public\.staff_accounts[\s\S]*?normalized_username/i,
@@ -1066,6 +1098,7 @@ describe("cloud integration schema contract", () => {
   test("keeps generated RPC types aligned with the migration signatures", () => {
     for (const functionName of [
       "has_active_role",
+      "bootstrap_staff_account",
       "provision_staff_account",
       "complete_staff_password_change",
       "ingest_workbuddy_turn",
@@ -1094,7 +1127,7 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*46\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*75\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);

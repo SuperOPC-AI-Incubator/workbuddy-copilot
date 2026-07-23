@@ -121,6 +121,9 @@ export type Database = {
       };
       staff_accounts: {
         Row: {
+          active_operation_desired: boolean | null;
+          active_operation_token: string | null;
+          active_state_version: number;
           auth_identity_version: number;
           created_at: string;
           created_by: string | null;
@@ -129,11 +132,16 @@ export type Database = {
           is_active: boolean;
           must_change_password: boolean;
           normalized_username: string;
+          password_reset_operation_token: string | null;
+          password_reset_previous_must_change: boolean | null;
           updated_at: string;
           user_id: string;
           username: string;
         };
         Insert: {
+          active_operation_desired?: boolean | null;
+          active_operation_token?: string | null;
+          active_state_version?: number;
           auth_identity_version?: number;
           created_at?: string;
           created_by?: string | null;
@@ -142,11 +150,16 @@ export type Database = {
           is_active?: boolean;
           must_change_password?: boolean;
           normalized_username: string;
+          password_reset_operation_token?: string | null;
+          password_reset_previous_must_change?: boolean | null;
           updated_at?: string;
           user_id: string;
           username: string;
         };
         Update: {
+          active_operation_desired?: boolean | null;
+          active_operation_token?: string | null;
+          active_state_version?: number;
           auth_identity_version?: number;
           created_at?: string;
           created_by?: string | null;
@@ -155,6 +168,8 @@ export type Database = {
           is_active?: boolean;
           must_change_password?: boolean;
           normalized_username?: string;
+          password_reset_operation_token?: string | null;
+          password_reset_previous_must_change?: boolean | null;
           updated_at?: string;
           user_id?: string;
           username?: string;
@@ -369,6 +384,57 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      bootstrap_staff_account: {
+        Args: {
+          _auth_identity_version?: number;
+          _is_team_admin?: boolean;
+          _user_id: string;
+          _username: string;
+        };
+        Returns: Json;
+      };
+      admin_begin_staff_active_operation: {
+        Args: {
+          _actor_user_id: string;
+          _is_active: boolean;
+          _operation_token: string;
+          _target_user_id: string;
+        };
+        Returns: Json;
+      };
+      admin_begin_staff_password_reset: {
+        Args: {
+          _actor_user_id: string;
+          _operation_token: string;
+          _target_user_id: string;
+        };
+        Returns: Json;
+      };
+      admin_confirm_staff_active_sync: {
+        Args: {
+          _actor_user_id: string;
+          _observed_version: number;
+          _operation_token: string | null;
+          _target_user_id: string;
+        };
+        Returns: Json;
+      };
+      admin_finish_staff_password_reset: {
+        Args: {
+          _actor_user_id: string;
+          _operation_token: string;
+          _succeeded: boolean;
+          _target_user_id: string;
+        };
+        Returns: Json;
+      };
+      admin_get_staff_active_sync_state: {
+        Args: {
+          _actor_user_id: string;
+          _target_user_id: string;
+        };
+        Returns: Json;
+      };
       complete_staff_password_change: {
         Args: {
           _user_id: string;
@@ -421,7 +487,7 @@ export type Database = {
       provision_staff_account: {
         Args: {
           _auth_identity_version?: number;
-          _created_by?: string | null;
+          _created_by: string;
           _is_team_admin?: boolean;
           _user_id: string;
           _username: string;

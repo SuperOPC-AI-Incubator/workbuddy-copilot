@@ -18,6 +18,7 @@ import { Route as OauthConsentRouteImport } from './routes/oauth.consent'
 import { Route as AuthenticatedWorkbuddyRouteImport } from './routes/_authenticated/workbuddy'
 import { Route as Char91DotwellKnownChar93OauthProtectedResourceRouteImport } from './routes/[.well-known]/oauth-protected-resource'
 import { Route as Char91DotmcpChar93ListToolsRouteImport } from './routes/[.mcp]/list-tools'
+import { Route as AuthenticatedAdminMentorsRouteImport } from './routes/_authenticated/admin.mentors'
 import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[.mcp]/invoke-tool/$tool'
 import { Route as DotlovableOauthConsentRouteImport } from './routes/[.]lovable.oauth.consent'
 import { Route as ApiPublicWorkbuddyIngestRouteImport } from './routes/api/public/workbuddy/ingest'
@@ -68,6 +69,12 @@ const Char91DotmcpChar93ListToolsRoute =
     path: '/.mcp/list-tools',
     getParentRoute: () => rootRouteImport,
   } as any)
+const AuthenticatedAdminMentorsRoute =
+  AuthenticatedAdminMentorsRouteImport.update({
+    id: '/admin/mentors',
+    path: '/admin/mentors',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const Char91DotmcpChar93InvokeToolToolRoute =
   Char91DotmcpChar93InvokeToolToolRouteImport.update({
     id: '/.mcp/invoke-tool/$tool',
@@ -97,6 +104,7 @@ export interface FileRoutesByFullPath {
   '/oauth/consent': typeof OauthConsentRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
+  '/admin/mentors': typeof AuthenticatedAdminMentorsRoute
   '/api/public/workbuddy/ingest': typeof ApiPublicWorkbuddyIngestRoute
 }
 export interface FileRoutesByTo {
@@ -110,6 +118,7 @@ export interface FileRoutesByTo {
   '/': typeof AuthenticatedIndexRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
+  '/admin/mentors': typeof AuthenticatedAdminMentorsRoute
   '/api/public/workbuddy/ingest': typeof ApiPublicWorkbuddyIngestRoute
 }
 export interface FileRoutesById {
@@ -125,6 +134,7 @@ export interface FileRoutesById {
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
+  '/_authenticated/admin/mentors': typeof AuthenticatedAdminMentorsRoute
   '/api/public/workbuddy/ingest': typeof ApiPublicWorkbuddyIngestRoute
 }
 export interface FileRouteTypes {
@@ -140,6 +150,7 @@ export interface FileRouteTypes {
     | '/oauth/consent'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
+    | '/admin/mentors'
     | '/api/public/workbuddy/ingest'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -153,6 +164,7 @@ export interface FileRouteTypes {
     | '/'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
+    | '/admin/mentors'
     | '/api/public/workbuddy/ingest'
   id:
     | '__root__'
@@ -167,6 +179,7 @@ export interface FileRouteTypes {
     | '/_authenticated/'
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
+    | '/_authenticated/admin/mentors'
     | '/api/public/workbuddy/ingest'
   fileRoutesById: FileRoutesById
 }
@@ -248,6 +261,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof Char91DotmcpChar93ListToolsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_authenticated/admin/mentors': {
+      id: '/_authenticated/admin/mentors'
+      path: '/admin/mentors'
+      fullPath: '/admin/mentors'
+      preLoaderRoute: typeof AuthenticatedAdminMentorsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/.mcp/invoke-tool/$tool': {
       id: '/.mcp/invoke-tool/$tool'
       path: '/.mcp/invoke-tool/$tool'
@@ -275,11 +295,13 @@ declare module '@tanstack/react-router' {
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedWorkbuddyRoute: typeof AuthenticatedWorkbuddyRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedAdminMentorsRoute: typeof AuthenticatedAdminMentorsRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedWorkbuddyRoute: AuthenticatedWorkbuddyRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedAdminMentorsRoute: AuthenticatedAdminMentorsRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =

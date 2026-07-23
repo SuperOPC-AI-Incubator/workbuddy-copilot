@@ -49,6 +49,7 @@ function MentorDesk() {
   const [wsConnected, setWsConnected] = useState(false);
   const [accountLabel, setAccountLabel] = useState<string>("");
   const [role, setRole] = useState<"mentor" | "student" | null>(null);
+  const [isTeamAdmin, setIsTeamAdmin] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const askAIFn = useServerFn(askAI);
   const draftFn = useServerFn(draftMentorTip);
@@ -93,12 +94,14 @@ function MentorDesk() {
         ({ role: accountRole }) => accountRole === "mentor" || accountRole === "team_admin",
       );
       const hasStudentRole = roles?.some(({ role: accountRole }) => accountRole === "student");
+      const hasTeamAdminRole = roles?.some(({ role: accountRole }) => accountRole === "team_admin");
       const staffAccessInvalid =
         rolesError || staffError || (staff && (!staff.is_active || !hasStaffRole));
 
       if (staffAccessInvalid || (!staff && hasStaffRole)) {
         setAccountLabel("");
         setRole(null);
+        setIsTeamAdmin(false);
         await supabase.auth.signOut();
         if (mounted) window.location.replace("/auth");
         return;
@@ -107,12 +110,14 @@ function MentorDesk() {
       if (staff) {
         setAccountLabel(staff.username);
         setRole("mentor");
+        setIsTeamAdmin(Boolean(hasTeamAdminRole));
         return;
       }
 
       if (studentError || !student || !hasStudentRole) {
         setAccountLabel("");
         setRole(null);
+        setIsTeamAdmin(false);
         await supabase.auth.signOut();
         if (mounted) window.location.replace("/auth");
         return;
@@ -120,6 +125,7 @@ function MentorDesk() {
 
       setAccountLabel(student.display_name);
       setRole("student");
+      setIsTeamAdmin(false);
     });
 
     return () => {
@@ -517,6 +523,7 @@ function MentorDesk() {
         onSignOut={signOut}
         staleCount={staleStudents.length}
         role={role}
+        isTeamAdmin={isTeamAdmin}
       />
       {role === "mentor" && staleStudents.length > 0 && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-6 py-2 text-xs text-amber-900 dark:text-amber-200">
@@ -671,6 +678,7 @@ function TopBar({
   onSignOut,
   staleCount,
   role,
+  isTeamAdmin,
 }: {
   studentCount: number;
   activeStudent: Student | null;
@@ -679,6 +687,7 @@ function TopBar({
   onSignOut: () => void;
   staleCount?: number;
   role?: "mentor" | "student" | null;
+  isTeamAdmin?: boolean;
 }) {
   return (
     <header
@@ -741,6 +750,15 @@ function TopBar({
             style={{ borderColor: "oklch(1 0 0 / 0.15)", color: "var(--sidebar-fg)" }}
           >
             WorkBuddy 接入
+          </Link>
+        )}
+        {isTeamAdmin && (
+          <Link
+            to="/admin/mentors"
+            className="rounded-md border px-2.5 py-1 text-xs transition-colors"
+            style={{ borderColor: "oklch(1 0 0 / 0.15)", color: "var(--sidebar-fg)" }}
+          >
+            导师账号
           </Link>
         )}
         <button

@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(46);
+SELECT plan(75);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -112,7 +112,7 @@ SET LOCAL ROLE service_role;
 
 SELECT throws_ok(
   $test$
-    SELECT public.provision_staff_account(
+    SELECT public.bootstrap_staff_account(
       _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
       _username => 'Uppercase.mentor'
     )
@@ -124,7 +124,7 @@ SELECT throws_ok(
 
 SELECT throws_ok(
   $test$
-    SELECT public.provision_staff_account(
+    SELECT public.bootstrap_staff_account(
       _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
       _username => 'ｆｕｌｌｗｉｄｔｈ'
     )
@@ -136,7 +136,7 @@ SELECT throws_ok(
 
 SELECT throws_ok(
   $test$
-    SELECT public.provision_staff_account(
+    SELECT public.bootstrap_staff_account(
       _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
       _username => 'a'
     )
@@ -148,7 +148,7 @@ SELECT throws_ok(
 
 SELECT throws_ok(
   $test$
-    SELECT public.provision_staff_account(
+    SELECT public.bootstrap_staff_account(
       _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
       _username => 'version.two',
       _auth_identity_version => 2
@@ -161,23 +161,23 @@ SELECT throws_ok(
 
 DO $setup$
 BEGIN
-  PERFORM public.provision_staff_account(
+  PERFORM public.bootstrap_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000101'::uuid,
     _username => 'active.mentor',
     _auth_identity_version => 1,
     _is_team_admin => true
   );
-  PERFORM public.provision_staff_account(
+  PERFORM public.bootstrap_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000102'::uuid,
     _username => 'disabled.mentor',
     _auth_identity_version => 1
   );
-  PERFORM public.provision_staff_account(
+  PERFORM public.bootstrap_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000103'::uuid,
     _username => 'must.change',
     _auth_identity_version => 1
   );
-  PERFORM public.provision_staff_account(
+  PERFORM public.bootstrap_staff_account(
     _user_id => '10000000-0000-0000-0000-000000000104'::uuid,
     _username => 'other.must.change',
     _auth_identity_version => 1
@@ -244,6 +244,18 @@ SELECT throws_ok(
   'authenticated browser cannot complete a staff password change'
 );
 
+SELECT throws_ok(
+  $test$
+    SELECT public.bootstrap_staff_account(
+      _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+      _username => 'browser.bootstrap'
+    )
+  $test$,
+  '42501',
+  'permission denied for function bootstrap_staff_account',
+  'authenticated clients cannot use the trusted bootstrap provisioner'
+);
+
 RESET ROLE;
 SET LOCAL ROLE service_role;
 
@@ -278,6 +290,29 @@ SELECT ok(
 
 SELECT throws_ok(
   $test$
+    SELECT public.provision_staff_account(
+      _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+      _username => 'regular.provision',
+      _created_by => '10000000-0000-0000-0000-000000000103'::uuid
+    )
+  $test$,
+  '42501',
+  'staff_admin_forbidden',
+  'regular provision revalidates the creating team admin in its transaction'
+);
+
+SELECT is(
+  public.provision_staff_account(
+    _user_id => '10000000-0000-0000-0000-000000000100'::uuid,
+    _username => 'regular.provision',
+    _created_by => '10000000-0000-0000-0000-000000000101'::uuid
+  ) ->> 'username',
+  'regular.provision',
+  'an active completed team admin can provision through the regular entry'
+);
+
+SELECT throws_ok(
+  $test$
     SELECT public.complete_staff_password_change(
       '10000000-0000-0000-0000-000000000001'::uuid
     )
@@ -297,6 +332,380 @@ SELECT throws_ok(
   'active_staff_account_required',
   'service role cannot complete a disabled staff password change'
 );
+
+RESET ROLE;
+
+SET LOCAL ROLE authenticated;
+SET LOCAL request.jwt.claim.sub = '10000000-0000-0000-0000-000000000101';
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_active_operation(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      false,
+      '30000000-0000-4000-8000-000000000001'::uuid
+    )
+  $test$,
+  '42501',
+  'permission denied for function admin_begin_staff_active_operation',
+  'authenticated clients cannot begin a staff active-state operation'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000002'::uuid
+    )
+  $test$,
+  '42501',
+  'permission denied for function admin_begin_staff_password_reset',
+  'authenticated clients cannot begin a staff password reset'
+);
+
+RESET ROLE;
+SET LOCAL ROLE service_role;
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_active_operation(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      false,
+      '30000000-0000-4000-8000-000000000003'::uuid
+    )
+  $test$,
+  '42501',
+  'staff_self_disable_forbidden',
+  'a team admin cannot disable itself'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '30000000-0000-4000-8000-000000000010'::uuid
+    )
+  $test$,
+  '42501',
+  'staff_self_password_reset_forbidden',
+  'a team admin cannot reset its own temporary password'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_active_operation(
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      false,
+      '30000000-0000-4000-8000-000000000004'::uuid
+    )
+  $test$,
+  '42501',
+  'last_active_team_admin_required',
+  'a distinct actor cannot disable the sole usable team admin'
+);
+
+SELECT is(
+  (
+    public.admin_begin_staff_active_operation(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      false,
+      '30000000-0000-4000-8000-000000000005'::uuid
+    ) ->> 'desired_active'
+  ),
+  'false',
+  'disable begin records the desired state while failing database access closed'
+);
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'admin_disable_state',
+  public.admin_get_staff_active_sync_state(
+    '10000000-0000-0000-0000-000000000101'::uuid,
+    '10000000-0000-0000-0000-000000000103'::uuid
+  );
+
+SELECT ok(
+  (
+    SELECT
+      result ->> 'operation_token'
+        = '30000000-0000-4000-8000-000000000005'
+      AND result ->> 'desired_active' = 'false'
+    FROM cloud_test_results
+    WHERE label = 'admin_disable_state'
+  ),
+  'active sync state exposes the exact pending operation and desired state'
+);
+
+SELECT is(
+  (
+    public.admin_begin_staff_active_operation(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      true,
+      '30000000-0000-4000-8000-000000000006'::uuid
+    ) ->> 'desired_active'
+  ),
+  'true',
+  'a newer enable supersedes the pending disable operation'
+);
+
+SELECT is(
+  (
+    public.admin_confirm_staff_active_sync(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      (
+        SELECT (result ->> 'version')::bigint
+        FROM cloud_test_results
+        WHERE label = 'admin_disable_state'
+      ),
+      '30000000-0000-4000-8000-000000000005'::uuid
+    ) ->> 'confirmed'
+  ),
+  'false',
+  'an older active-state confirmation cannot commit over a newer operation'
+);
+
+SELECT is(
+  (
+    public.admin_confirm_staff_active_sync(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      (
+        public.admin_get_staff_active_sync_state(
+          '10000000-0000-0000-0000-000000000101'::uuid,
+          '10000000-0000-0000-0000-000000000103'::uuid
+        ) ->> 'version'
+      )::bigint,
+      '30000000-0000-4000-8000-000000000006'::uuid
+    ) ->> 'confirmed'
+  ),
+  'true',
+  'the current active-state operation confirms after Auth reconciliation'
+);
+
+SELECT ok(
+  (
+    SELECT
+      is_active = true
+      AND disabled_at IS NULL
+      AND disabled_by IS NULL
+      AND active_operation_token IS NULL
+      AND active_operation_desired IS NULL
+    FROM public.staff_accounts
+    WHERE user_id = '10000000-0000-0000-0000-000000000103'::uuid
+  ),
+  'confirmed activation clears operation and disable audit state'
+);
+
+SELECT is(
+  (
+    public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000007'::uuid
+    ) ->> 'previous_value'
+  )::boolean,
+  false,
+  'first password reset owns the previous false gate'
+);
+
+SELECT is(
+  (
+    public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000008'::uuid
+    ) ->> 'previous_value'
+  )::boolean,
+  true,
+  'newer password reset takes ownership without weakening the gate'
+);
+
+SELECT is(
+  (
+    public.admin_finish_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000008'::uuid,
+      true
+    ) ->> 'applied'
+  )::boolean,
+  true,
+  'current successful reset clears only its operation ownership'
+);
+
+SELECT is(
+  (
+    public.admin_finish_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000007'::uuid,
+      false
+    ) ->> 'applied'
+  )::boolean,
+  false,
+  'older failed reset cannot compensate after newer success'
+);
+
+SELECT ok(
+  (
+    SELECT
+      must_change_password = true
+      AND password_reset_operation_token IS NULL
+      AND password_reset_previous_must_change IS NULL
+    FROM public.staff_accounts
+    WHERE user_id = '10000000-0000-0000-0000-000000000103'::uuid
+  ),
+  'successful reset leaves the must-change gate enabled and ownership cleared'
+);
+
+UPDATE public.staff_accounts
+SET must_change_password = false
+WHERE user_id = '10000000-0000-0000-0000-000000000103'::uuid;
+
+SELECT is(
+  (
+    public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000009'::uuid
+    ) ->> 'previous_value'
+  )::boolean,
+  false,
+  'failed-reset fixture captures a false previous gate'
+);
+
+SELECT is(
+  (
+    public.admin_finish_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000009'::uuid,
+      false
+    ) ->> 'applied'
+  )::boolean,
+  true,
+  'current failed reset restores its captured previous gate'
+);
+
+SELECT ok(
+  (
+    SELECT
+      must_change_password = false
+      AND password_reset_operation_token IS NULL
+      AND password_reset_previous_must_change IS NULL
+    FROM public.staff_accounts
+    WHERE user_id = '10000000-0000-0000-0000-000000000103'::uuid
+  ),
+  'failed reset restoration clears operation ownership without leaving a gate'
+);
+
+INSERT INTO public.user_roles (user_id, role)
+VALUES (
+  '10000000-0000-0000-0000-000000000103'::uuid,
+  'team_admin'::public.app_role
+);
+
+SELECT is(
+  (
+    public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000011'::uuid
+    ) ->> 'previous_value'
+  )::boolean,
+  false,
+  'first of two usable admins can begin resetting the other'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '30000000-0000-4000-8000-000000000012'::uuid
+    )
+  $test$,
+  '42501',
+  'staff_admin_forbidden',
+  'mutual admin reset keeps one usable team admin'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_active_operation(
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      false,
+      '30000000-0000-4000-8000-000000000013'::uuid
+    )
+  $test$,
+  '42501',
+  'last_active_team_admin_required',
+  'reset then disable interleaving keeps one usable team admin'
+);
+
+SELECT is(
+  (
+    public.admin_finish_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000011'::uuid,
+      false
+    ) ->> 'applied'
+  )::boolean,
+  true,
+  'the first reset can restore the second admin after the interleaving checks'
+);
+
+SELECT is(
+  (
+    public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '30000000-0000-4000-8000-000000000014'::uuid
+    ) ->> 'previous_value'
+  )::boolean,
+  false,
+  'the reverse reset order starts while both admins are usable'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.admin_begin_staff_password_reset(
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '30000000-0000-4000-8000-000000000015'::uuid
+    )
+  $test$,
+  '42501',
+  'staff_admin_forbidden',
+  'reverse mutual reset also preserves one usable team admin'
+);
+
+SELECT is(
+  (
+    public.admin_finish_staff_password_reset(
+      '10000000-0000-0000-0000-000000000103'::uuid,
+      '10000000-0000-0000-0000-000000000101'::uuid,
+      '30000000-0000-4000-8000-000000000014'::uuid,
+      false
+    ) ->> 'applied'
+  )::boolean,
+  true,
+  'the reverse reset restores the original admin'
+);
+
+DELETE FROM public.user_roles
+WHERE user_id = '10000000-0000-0000-0000-000000000103'::uuid
+  AND role = 'team_admin'::public.app_role;
 
 RESET ROLE;
 

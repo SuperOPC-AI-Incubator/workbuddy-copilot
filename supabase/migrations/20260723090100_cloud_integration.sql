@@ -505,8 +505,120 @@ REVOKE ALL ON FUNCTION public.handle_new_user()
 CREATE OR REPLACE FUNCTION public.provision_staff_account(
   _user_id uuid,
   _username text,
+  _created_by uuid,
   _auth_identity_version integer DEFAULT 1,
-  _created_by uuid DEFAULT NULL,
+  _is_team_admin boolean DEFAULT false
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = ''
+AS $function$
+BEGIN
+  IF _user_id IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22004',
+      MESSAGE = 'staff_user_id_required';
+  END IF;
+
+  IF _username IS NULL
+    OR _username IS DISTINCT FROM pg_catalog.lower(
+      pg_catalog.btrim(_username)
+    )
+    OR pg_catalog.char_length(_username) NOT BETWEEN 2 AND 32
+    OR _username !~ '^[a-z0-9][a-z0-9._-]{1,31}$'
+  THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'invalid_staff_username';
+  END IF;
+
+  IF _auth_identity_version IS NULL OR _auth_identity_version <> 1 THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '22023',
+      MESSAGE = 'invalid_auth_identity_version';
+  END IF;
+
+  IF _created_by IS NULL THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'staff_admin_forbidden';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('mentor-admin-state', 0)
+  );
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM public.staff_accounts AS actor
+    JOIN public.user_roles AS actor_role
+      ON actor_role.user_id = actor.user_id
+    WHERE actor.user_id = _created_by
+      AND actor.is_active = true
+      AND actor.must_change_password = false
+      AND actor_role.role = 'team_admin'::public.app_role
+  ) THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '42501',
+      MESSAGE = 'staff_admin_forbidden';
+  END IF;
+
+  INSERT INTO public.staff_accounts (
+    user_id,
+    username,
+    normalized_username,
+    auth_identity_version,
+    created_by
+  )
+  VALUES (
+    _user_id,
+    _username,
+    _username,
+    _auth_identity_version,
+    _created_by
+  );
+
+  INSERT INTO public.user_roles (user_id, role)
+  VALUES (_user_id, 'mentor'::public.app_role)
+  ON CONFLICT (user_id, role) DO NOTHING;
+
+  IF _is_team_admin THEN
+    INSERT INTO public.user_roles (user_id, role)
+    VALUES (_user_id, 'team_admin'::public.app_role)
+    ON CONFLICT (user_id, role) DO NOTHING;
+  END IF;
+
+  RETURN pg_catalog.jsonb_build_object(
+    'user_id', _user_id,
+    'username', _username,
+    'normalized_username', _username,
+    'auth_identity_version', _auth_identity_version,
+    'is_team_admin', _is_team_admin,
+    'must_change_password', true
+  );
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.provision_staff_account(
+  uuid,
+  text,
+  uuid,
+  integer,
+  boolean
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.provision_staff_account(
+  uuid,
+  text,
+  uuid,
+  integer,
+  boolean
+) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.bootstrap_staff_account(
+  _user_id uuid,
+  _username text,
+  _auth_identity_version integer DEFAULT 1,
   _is_team_admin boolean DEFAULT false
 )
 RETURNS jsonb
@@ -551,7 +663,7 @@ BEGIN
     _username,
     _username,
     _auth_identity_version,
-    _created_by
+    NULL
   );
 
   INSERT INTO public.user_roles (user_id, role)
@@ -575,18 +687,16 @@ BEGIN
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.provision_staff_account(
+REVOKE ALL ON FUNCTION public.bootstrap_staff_account(
   uuid,
   text,
   integer,
-  uuid,
   boolean
 ) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.provision_staff_account(
+GRANT EXECUTE ON FUNCTION public.bootstrap_staff_account(
   uuid,
   text,
   integer,
-  uuid,
   boolean
 ) TO service_role;
 
