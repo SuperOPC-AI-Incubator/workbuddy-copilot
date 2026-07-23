@@ -4,6 +4,7 @@ set -Eeuo pipefail
 APP_ROOT="${APP_ROOT:-/opt/superbrain-copilot}"
 SERVICE_NAME="superbrain-copilot.service"
 HEALTH_BASE_URL="http://127.0.0.1:3410"
+DEPLOY_ENV_FILE="${DEPLOY_ENV_FILE:-/etc/superbrain-copilot.env}"
 WAIT_ATTEMPTS="${DEPLOY_WAIT_ATTEMPTS:-30}"
 WAIT_INTERVAL_SECONDS="${DEPLOY_WAIT_INTERVAL_SECONDS:-2}"
 CURRENT_LINK="$APP_ROOT/current"
@@ -95,16 +96,104 @@ if [[ -L "$CURRENT_LINK" ]]; then
 fi
 
 run_release_build() {
-  /usr/bin/python3 - "$RELEASE_DIR" "$RELEASE_IDENTITY" "$RELEASE_ID" <<'PY'
+  /usr/bin/python3 - \
+    "$RELEASE_DIR" "$RELEASE_IDENTITY" "$RELEASE_ID" "$DEPLOY_ENV_FILE" <<'PY'
 import os
+import re
+import shlex
 import stat
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
-release_path, expected_identity, release_id = sys.argv[1:]
+release_path, expected_identity, release_id, deploy_env_path = sys.argv[1:]
 required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
 if any(not hasattr(os, name) for name in required_flags):
     raise SystemExit("directory identity flags are unavailable")
+
+public_names = (
+    "VITE_SUPABASE_URL",
+    "VITE_SUPABASE_PUBLISHABLE_KEY",
+    "VITE_SUPABASE_PROJECT_ID",
+)
+private_names = (
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "WORKBUDDY_INGEST_SECRET",
+    "DEEPSEEK_API_KEY",
+)
+
+
+def load_public_config(path):
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    config_fd = os.open(path, flags)
+    try:
+        metadata = os.fstat(config_fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise SystemExit("deployment environment must be a regular file")
+        with os.fdopen(os.dup(config_fd), encoding="utf-8") as config_file:
+            lines = config_file.readlines()
+    finally:
+        os.close(config_fd)
+
+    values = {}
+    for line_number, original in enumerate(lines, start=1):
+        stripped = original.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, separator, raw_value = original.partition("=")
+        key = key.strip()
+        if not separator:
+            raise SystemExit(
+                f"deployment environment line {line_number} is not an assignment"
+            )
+        if key not in public_names:
+            continue
+        if key in values:
+            raise SystemExit(f"deployment environment repeats {key}")
+        try:
+            tokens = shlex.split(raw_value, comments=True, posix=True)
+        except ValueError as error:
+            raise SystemExit(
+                f"deployment environment has invalid quoting for {key}"
+            ) from error
+        if len(tokens) != 1 or not tokens[0]:
+            raise SystemExit(f"deployment environment has an invalid value for {key}")
+        values[key] = tokens[0]
+
+    missing = [name for name in public_names if not values.get(name)]
+    if missing:
+        raise SystemExit(
+            "deployment environment is missing public build value(s): "
+            + ", ".join(missing)
+        )
+
+    project_id = values["VITE_SUPABASE_PROJECT_ID"]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,62}", project_id):
+        raise SystemExit("VITE_SUPABASE_PROJECT_ID has an invalid format")
+
+    public_url = urlsplit(values["VITE_SUPABASE_URL"])
+    if (
+        public_url.scheme != "https"
+        or public_url.hostname != f"{project_id}.supabase.co"
+        or public_url.username is not None
+        or public_url.password is not None
+        or public_url.port is not None
+        or public_url.path not in ("", "/")
+        or public_url.query
+        or public_url.fragment
+    ):
+        raise SystemExit(
+            "VITE_SUPABASE_URL must be the matching direct HTTPS Supabase project origin"
+        )
+
+    return values
+
+
+public_config = load_public_config(deploy_env_path)
+clean_environment = os.environ.copy()
+for name in (*public_names, *private_names):
+    clean_environment.pop(name, None)
+build_environment = clean_environment | public_config
 
 directory_fd = os.open(
     release_path,
@@ -118,12 +207,13 @@ try:
         raise SystemExit("release path is not a directory")
 
     os.fchdir(directory_fd)
-    for command in (
+    subprocess.run(
         ["bun", "install", "--frozen-lockfile"],
-        ["bun", "run", "check"],
-        ["bun", "run", "build"],
-    ):
-        subprocess.run(command, check=True)
+        check=True,
+        env=clean_environment,
+    )
+    subprocess.run(["bun", "run", "check"], check=True, env=clean_environment)
+    subprocess.run(["bun", "run", "build"], check=True, env=build_environment)
 
     if not os.path.isfile(".output/server/index.mjs"):
         raise SystemExit("build did not create .output/server/index.mjs")
@@ -176,13 +266,41 @@ revalidate_release_path ||
 
 atomic_set_current() {
   local target="$1"
-  rm -f "$NEXT_LINK"
-  ln -s "$target" "$NEXT_LINK"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    mv -hf "$NEXT_LINK" "$CURRENT_LINK"
-  else
-    mv -Tf "$NEXT_LINK" "$CURRENT_LINK"
-  fi
+  local expected_identity="${2:-}"
+  rm -f "$NEXT_LINK" || return 1
+  ln -s "$target" "$NEXT_LINK" || return 1
+  /usr/bin/python3 - \
+    "$APP_ROOT" "$NEXT_LINK" "$CURRENT_LINK" "$target" "$expected_identity" <<'PY'
+import os
+import sys
+
+app_root, next_path, current_path, expected_target, expected_identity = sys.argv[1:]
+if os.path.dirname(next_path) != app_root or os.path.dirname(current_path) != app_root:
+    raise SystemExit("publication links must be direct children of the application root")
+
+app_fd = os.open(app_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    next_name = os.path.basename(next_path)
+    current_name = os.path.basename(current_path)
+    if os.readlink(next_name, dir_fd=app_fd) != expected_target:
+        raise SystemExit("publication symlink target changed")
+    if expected_identity:
+        target_fd = os.open(next_name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=app_fd)
+        try:
+            target = os.fstat(target_fd)
+            if f"{target.st_dev}:{target.st_ino}" != expected_identity:
+                raise SystemExit("publication symlink does not resolve to pinned release")
+        finally:
+            os.close(target_fd)
+    os.replace(
+        next_name,
+        current_name,
+        src_dir_fd=app_fd,
+        dst_dir_fd=app_fd,
+    )
+finally:
+    os.close(app_fd)
+PY
 }
 
 run_systemctl() {
@@ -279,9 +397,17 @@ rollback() {
       printf 'rollback failed: service stop failed\n' >&2
       return 1
     fi
+    local active_status
     if run_systemctl is-active --quiet "$SERVICE_NAME"; then
       printf 'rollback failed: service remains active after stop\n' >&2
       return 1
+    else
+      active_status=$?
+      if ((active_status != 3)); then
+        printf 'rollback failed: service inactive state check failed with status %s\n' \
+          "$active_status" >&2
+        return 1
+      fi
     fi
     printf 'rollback stopped the failed first release\n' >&2
   fi
@@ -297,7 +423,7 @@ fail_after_rollback() {
   fi
 }
 
-atomic_set_current "$RELEASE_DIR"
+atomic_set_current "$RELEASE_DIR" "$RELEASE_IDENTITY"
 if ! run_systemctl restart "$SERVICE_NAME"; then
   fail_after_rollback "service restart failed"
 fi

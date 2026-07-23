@@ -47,6 +47,14 @@ make_fake_toolchain() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'bun|%s|%s\n' "$PWD" "$*" >>"$OPS_LOG"
+printf 'bun-env|%s|VITE_URL=%s|VITE_KEY=%s|VITE_PROJECT=%s|SERVICE_ROLE=%s|INGEST=%s|DEEPSEEK=%s\n' \
+  "$*" \
+  "${VITE_SUPABASE_URL-UNSET}" \
+  "${VITE_SUPABASE_PUBLISHABLE_KEY-UNSET}" \
+  "${VITE_SUPABASE_PROJECT_ID-UNSET}" \
+  "${SUPABASE_SERVICE_ROLE_KEY-UNSET}" \
+  "${WORKBUDDY_INGEST_SECRET-UNSET}" \
+  "${DEEPSEEK_API_KEY-UNSET}" >>"$OPS_LOG"
 if [[ "$*" == "run build" ]]; then
   mkdir -p .output/server
   printf 'export default {};\n' >.output/server/index.mjs
@@ -58,6 +66,23 @@ if [[ "$*" == "install --frozen-lockfile" && -n "${FAKE_BUN_BLOCK_STARTED:-}" ]]
   done
 fi
 if [[ "$*" == "install --frozen-lockfile" && "${FAKE_SWAP_ON_INSTALL:-0}" == "1" ]]; then
+  /bin/mv "$FAKE_RELEASE_PATH" "$FAKE_RENAMED_RELEASE_PATH"
+  /bin/ln -s "$FAKE_EXTERNAL_RELEASE_PATH" "$FAKE_RELEASE_PATH"
+fi
+EOF
+
+  cat >"$bin_dir/ln" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ln|%s\n' "$*" >>"$OPS_LOG"
+link_count="$(grep -c '^ln|' "$OPS_LOG")"
+if [[ "${FAKE_LN_FAIL_NUMBER:-0}" == "$link_count" ]]; then
+  exit 1
+fi
+/bin/ln "$@"
+next_link="${!#}"
+if [[ "${FAKE_SWAP_AFTER_NEXT_LINK:-0}" == "1" &&
+  "$next_link" == "$APP_ROOT"/.current.next.* ]]; then
   /bin/mv "$FAKE_RELEASE_PATH" "$FAKE_RENAMED_RELEASE_PATH"
   /bin/ln -s "$FAKE_EXTERNAL_RELEASE_PATH" "$FAKE_RELEASE_PATH"
 fi
@@ -225,7 +250,7 @@ case "${FAKE_NGINX_MODE:?}" in
     grep -F "listen 443 ssl http2;" "$config" >/dev/null
     grep -F "ssl_certificate /etc/letsencrypt/live/copilot.sg.superbrain-ai.com/fullchain.pem;" \
       "$config" >/dev/null
-    grep -F 'return 301 https://$host$request_uri;' "$config" >/dev/null
+    grep -F 'return 301 https://copilot.sg.superbrain-ai.com$request_uri;' "$config" >/dev/null
     grep -F "proxy_pass http://127.0.0.1:3410;" "$config" >/dev/null
     ;;
   *)
@@ -234,8 +259,24 @@ case "${FAKE_NGINX_MODE:?}" in
 esac
 EOF
 
-  chmod +x "$bin_dir/bun" "$bin_dir/systemctl" "$bin_dir/mv" "$bin_dir/curl" \
-    "$bin_dir/flock" "$bin_dir/nginx"
+  chmod +x "$bin_dir/bun" "$bin_dir/ln" "$bin_dir/systemctl" "$bin_dir/mv" \
+    "$bin_dir/curl" "$bin_dir/flock" "$bin_dir/nginx"
+}
+
+write_fake_deploy_env() {
+  local env_file="$1"
+  cat >"$env_file" <<'EOF'
+SUPABASE_URL=https://test-project.supabase.co
+SUPABASE_PUBLISHABLE_KEY=server-publishable-value
+SUPABASE_SERVICE_ROLE_KEY=service-role-must-not-reach-build
+VITE_SUPABASE_URL=https://test-project.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=public-browser-key-value
+VITE_SUPABASE_PROJECT_ID=test-project
+WORKBUDDY_INGEST_SECRET=ingest-must-not-reach-build
+DEEPSEEK_API_KEY=deepseek-must-not-reach-build
+DOMAIN_PACK=prototype
+PORT=3410
+EOF
 }
 
 test_static_contracts() {
@@ -270,7 +311,9 @@ test_static_contracts() {
   assert_contains "$NGINX_SITE" \
     "ssl_certificate_key /etc/letsencrypt/live/copilot.sg.superbrain-ai.com/privkey.pem;"
   assert_contains "$NGINX_SITE" "location ^~ /.well-known/acme-challenge/"
-  assert_contains "$NGINX_SITE" 'return 301 https://$host$request_uri;'
+  assert_contains "$NGINX_SITE" \
+    'return 301 https://copilot.sg.superbrain-ai.com$request_uri;'
+  assert_not_contains "$NGINX_SITE" 'return 301 https://$host'
   assert_contains "$NGINX_SITE" "proxy_pass http://127.0.0.1:3410;"
   assert_contains "$NGINX_SITE" 'proxy_set_header Upgrade $http_upgrade;'
   assert_contains "$NGINX_SITE" "proxy_buffering off;"
@@ -310,6 +353,18 @@ test_static_contracts() {
   assert_contains "$DEPLOYMENT_DOC" "Trust boundary"
   assert_contains "$DEPLOYMENT_DOC" "device/inode"
   assert_contains "$DEPLOYMENT_DOC" "rollback failed"
+
+  local release_heading_line
+  local first_healthcheck_line
+  release_heading_line="$(grep -n '^## Release$' "$DEPLOYMENT_DOC" | cut -d: -f1)"
+  first_healthcheck_line="$(
+    grep -n 'scripts/healthcheck.sh https://copilot.sg.superbrain-ai.com' \
+      "$DEPLOYMENT_DOC" | head -n 1 | cut -d: -f1
+  )"
+  [[ -n "$release_heading_line" && -n "$first_healthcheck_line" ]] ||
+    fail "deployment runbook is missing release or healthcheck instructions"
+  ((first_healthcheck_line > release_heading_line)) ||
+    fail "business healthcheck appears before the first successful release"
 }
 
 test_nginx_tls_lifecycle() {
@@ -492,7 +547,7 @@ test_rollback_failures_are_never_reported_as_restored() {
     elif [[ "$scenario" == "old-not-ready" ]]; then
       scenario_env+=(FAKE_OLD_READY_STATUS=503)
     else
-      scenario_env+=(FAKE_MV_FAIL_NUMBER=2 FAKE_NEW_HEALTH_RELEASE_ID=old-release)
+      scenario_env+=(FAKE_LN_FAIL_NUMBER=2 FAKE_NEW_HEALTH_RELEASE_ID=old-release)
     fi
 
     set +e
@@ -513,7 +568,7 @@ test_rollback_failures_are_never_reported_as_restored() {
 test_first_deploy_requires_stop_and_inactive_service() {
   local test_root="$1"
   local scenario
-  for scenario in stop-fails still-active; do
+  for scenario in stop-fails still-active status-check-fails; do
     local case_root="$test_root/first-$scenario"
     local app_root="$case_root/app"
     local new_release="$app_root/releases/new-release"
@@ -527,8 +582,10 @@ test_first_deploy_requires_stop_and_inactive_service() {
     local -a scenario_env=()
     if [[ "$scenario" == "stop-fails" ]]; then
       scenario_env+=(FAKE_SYSTEMCTL_STOP_STATUS=1)
-    else
+    elif [[ "$scenario" == "still-active" ]]; then
       scenario_env+=(FAKE_SYSTEMCTL_IS_ACTIVE_STATUS=0)
+    else
+      scenario_env+=(FAKE_SYSTEMCTL_IS_ACTIVE_STATUS=1)
     fi
 
     set +e
@@ -552,7 +609,7 @@ test_first_deploy_requires_stop_and_inactive_service() {
 test_release_path_swap_fails_before_external_write_or_publish() {
   local test_root="$1"
   local attack_phase
-  for attack_phase in flock install; do
+  for attack_phase in flock install publish; do
     local case_root="$test_root/swap-$attack_phase"
     local app_root="$case_root/app"
     local old_release="$app_root/releases/old-release"
@@ -572,8 +629,10 @@ test_release_path_swap_fails_before_external_write_or_publish() {
     )
     if [[ "$attack_phase" == "flock" ]]; then
       attack_env+=(FAKE_SWAP_ON_FLOCK=1)
-    else
+    elif [[ "$attack_phase" == "install" ]]; then
       attack_env+=(FAKE_SWAP_ON_INSTALL=1)
+    else
+      attack_env+=(FAKE_SWAP_AFTER_NEXT_LINK=1)
     fi
 
     set +e
@@ -596,6 +655,78 @@ test_release_path_swap_fails_before_external_write_or_publish() {
       fail "$attack_phase path replacement restarted or stopped a service"
     fi
   done
+}
+
+test_build_receives_only_validated_public_supabase_config() {
+  local test_root="$1"
+  local case_root="$test_root/build-env"
+  local app_root="$case_root/app"
+  local old_release="$app_root/releases/old-release"
+  local new_release="$app_root/releases/new-release"
+  local fake_bin="$case_root/fake-bin"
+  local ops_log="$case_root/ops.log"
+  local env_file="$case_root/superbrain-copilot.env"
+  local executed_marker="$case_root/environment-file-was-executed"
+
+  mkdir -p "$old_release/.output/server" "$new_release"
+  printf '{}\n' >"$new_release/package.json"
+  printf 'old\n' >"$old_release/.output/server/index.mjs"
+  ln -s "$old_release" "$app_root/current"
+  make_fake_toolchain "$fake_bin"
+  write_fake_deploy_env "$env_file"
+  printf 'UNRELATED_VALUE=$(touch %s)\n' "$executed_marker" >>"$env_file"
+  : >"$ops_log"
+
+  PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" APP_ROOT="$app_root" \
+    DEPLOY_ENV_FILE="$env_file" DEPLOY_NO_SUDO=1 DEPLOY_WAIT_ATTEMPTS=1 \
+    DEPLOY_WAIT_INTERVAL_SECONDS=0 FAKE_HEALTH_RELEASE_ID=new-release \
+    SUPABASE_SERVICE_ROLE_KEY=ambient-service-role \
+    WORKBUDDY_INGEST_SECRET=ambient-ingest \
+    DEEPSEEK_API_KEY=ambient-deepseek \
+    "$DEPLOY_SCRIPT" "$new_release"
+
+  assert_contains "$ops_log" \
+    "bun-env|install --frozen-lockfile|VITE_URL=UNSET|VITE_KEY=UNSET|VITE_PROJECT=UNSET|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET"
+  assert_contains "$ops_log" \
+    "bun-env|run check|VITE_URL=UNSET|VITE_KEY=UNSET|VITE_PROJECT=UNSET|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET"
+  assert_contains "$ops_log" \
+    "bun-env|run build|VITE_URL=https://test-project.supabase.co|VITE_KEY=public-browser-key-value|VITE_PROJECT=test-project|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET"
+  [[ ! -e "$executed_marker" ]] ||
+    fail "deployment environment file content was executed"
+}
+
+test_build_fails_closed_when_public_supabase_config_is_missing() {
+  local test_root="$1"
+  local case_root="$test_root/build-env-missing"
+  local app_root="$case_root/app"
+  local old_release="$app_root/releases/old-release"
+  local new_release="$app_root/releases/new-release"
+  local fake_bin="$case_root/fake-bin"
+  local ops_log="$case_root/ops.log"
+  local env_file="$case_root/superbrain-copilot.env"
+
+  mkdir -p "$old_release/.output/server" "$new_release"
+  printf '{}\n' >"$new_release/package.json"
+  printf 'old\n' >"$old_release/.output/server/index.mjs"
+  ln -s "$old_release" "$app_root/current"
+  make_fake_toolchain "$fake_bin"
+  write_fake_deploy_env "$env_file"
+  sed -i.bak '/^VITE_SUPABASE_PROJECT_ID=/d' "$env_file"
+  rm -f "$env_file.bak"
+  : >"$ops_log"
+
+  if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" APP_ROOT="$app_root" \
+    DEPLOY_ENV_FILE="$env_file" DEPLOY_NO_SUDO=1 DEPLOY_WAIT_ATTEMPTS=1 \
+    DEPLOY_WAIT_INTERVAL_SECONDS=0 FAKE_HEALTH_RELEASE_ID=new-release \
+    "$DEPLOY_SCRIPT" "$new_release" >"$case_root/deploy.out" 2>&1; then
+    fail "deploy accepted missing browser-build Supabase configuration"
+  fi
+
+  assert_eq "$(readlink "$app_root/current")" "$old_release" \
+    "missing public config current symlink"
+  if grep -Eq '^(bun|systemctl)\|' "$ops_log"; then
+    fail "missing public config reached build or service side effects"
+  fi
 }
 
 test_concurrent_deploy_fails_before_side_effects_and_releases_lock() {
@@ -694,6 +825,9 @@ test_healthcheck_exact_status_contract() {
 main() {
   TEST_ROOT="$(mktemp -d)"
   trap 'rm -rf "$TEST_ROOT"' EXIT
+  DEPLOY_ENV_FILE="$TEST_ROOT/superbrain-copilot.env"
+  write_fake_deploy_env "$DEPLOY_ENV_FILE"
+  export DEPLOY_ENV_FILE
 
   if [[ "${1:-}" == "concurrency" ]]; then
     test_concurrent_deploy_fails_before_side_effects_and_releases_lock "$TEST_ROOT"
@@ -717,6 +851,12 @@ main() {
     printf 'deployment path identity tests passed\n'
     return
   fi
+  if [[ "${1:-}" == "build-env" ]]; then
+    test_build_receives_only_validated_public_supabase_config "$TEST_ROOT"
+    test_build_fails_closed_when_public_supabase_config_is_missing "$TEST_ROOT"
+    printf 'deployment browser-build environment tests passed\n'
+    return
+  fi
 
   test_tracked_env_is_secret_free
   test_static_contracts
@@ -730,6 +870,8 @@ main() {
   test_rollback_failures_are_never_reported_as_restored "$TEST_ROOT"
   test_first_deploy_requires_stop_and_inactive_service "$TEST_ROOT"
   test_release_path_swap_fails_before_external_write_or_publish "$TEST_ROOT"
+  test_build_receives_only_validated_public_supabase_config "$TEST_ROOT"
+  test_build_fails_closed_when_public_supabase_config_is_missing "$TEST_ROOT"
   test_concurrent_deploy_fails_before_side_effects_and_releases_lock "$TEST_ROOT"
   test_healthcheck_exact_status_contract "$TEST_ROOT"
   printf 'deployment asset tests passed\n'

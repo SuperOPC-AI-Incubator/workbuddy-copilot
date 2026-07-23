@@ -86,14 +86,17 @@ sudo install -m 0644 deploy/nginx/copilot.sg.superbrain-ai.com.conf \
 sudo nginx -t
 sudo systemctl reload nginx
 
-scripts/healthcheck.sh https://copilot.sg.superbrain-ai.com
+curl --noproxy '*' -sS --connect-timeout 5 --max-time 10 \
+  -o /dev/null https://copilot.sg.superbrain-ai.com/
 ```
 
 The bootstrap template serves only `/.well-known/acme-challenge/` and returns
 404 for application paths. The production template keeps that challenge path
 for renewal, redirects all other HTTP traffic to HTTPS, and proxies application
 traffic only from its `listen 443 ssl http2` server. Never reload Nginx when
-`nginx -t` fails.
+`nginx -t` fails. The final `curl` checks DNS and the public TLS handshake
+without requiring the application to be running; HTTP error responses do not
+fail that command because the first release does not exist yet.
 
 ## Release
 
@@ -113,6 +116,14 @@ identifies the requested release, and requires `/api/ready` to return exactly
 HTTP 200. A second deploy attempt fails before install, symlink, or service
 side effects while another deploy process holds `/opt/superbrain-copilot/.deploy.lock`.
 
+The production build reads `/etc/superbrain-copilot.env` as data, never as a
+shell script. It requires a matching HTTPS `VITE_SUPABASE_URL`,
+`VITE_SUPABASE_PUBLISHABLE_KEY`, and `VITE_SUPABASE_PROJECT_ID`. Only those
+three public values are passed to the final browser build. Install, checks, and
+the final build do not receive `SUPABASE_SERVICE_ROLE_KEY`,
+`WORKBUDDY_INGEST_SECRET`, or `DEEPSEEK_API_KEY`; those remain runtime-only
+systemd environment values.
+
 ### Trust boundary and path identity
 
 `/opt/superbrain-copilot` and every release directory must be writable only by
@@ -129,7 +140,8 @@ actively malicious root or `deploy` account untrusted. Those accounts can
 replace application code or the service definition directly and remain inside
 the deployment trust boundary.
 
-Run the public post-deployment contract after TLS is active:
+After `scripts/deploy.sh` reports a successful release, run the public
+post-deployment business contract:
 
 ```bash
 scripts/healthcheck.sh https://copilot.sg.superbrain-ai.com
