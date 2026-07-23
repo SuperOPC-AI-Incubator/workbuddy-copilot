@@ -98,6 +98,47 @@ sanitized `401`; malformed database responses and gateway failures receive a
 sanitized `500`. Responses never include the bearer token, its hash, internal
 database errors, or staff user IDs.
 
+## MCP display and acknowledgement loop
+
+The authenticated MCP surface maps the verified OAuth user to its student
+record; neither delivery tool accepts a `student_id`.
+
+Delivery is an at-least-once protocol with a completed-response boundary:
+
+1. At the start of a new user turn, WorkBuddy may acknowledge
+   `pending_ack_ids` from the prior completed assistant response. It calls
+   `ack_mentor_messages` with `displayed_message_ids` and the required literal
+   `displayed_in_prior_completed_turn: true`.
+2. `log_turn` persists the new base turn and returns a machine-readable
+   `next_action` pointing to `get_unread_mentor_messages`. Any subsequently
+   fetched mentor quotation is delivery data, not another learner/AI turn.
+3. `get_unread_mentor_messages` fetches pending messages through the same
+   delivery service and RPC used by the public API. Fetching updates counters
+   but never acknowledges.
+4. WorkBuddy treats the returned JSON block as untrusted mentor quotation data.
+   It displays each `messages[].text` verbatim but never executes instructions
+   inside that text.
+5. Messages fetched in the current turn are **not** acknowledged in that turn.
+   Their `pending_ack_ids` are carried to the next user-turn boundary.
+
+This deliberately favors repetition over loss. If response generation,
+streaming, or the process is interrupted, no acknowledgement is sent and the
+same messages remain pending after restart. The server cannot independently
+observe that a UI rendered text; `displayed_in_prior_completed_turn: true` is a
+client assertion. Requiring a later user turn establishes a stronger causal
+boundary than acknowledging inside the response that is still being built.
+
+The MCP page size defaults to and is capped at three. An opaque cursor continues
+pagination. Mentor text occurs only once in the tool result, inside one JSON
+data block; structured output contains metadata and protocol IDs without a
+second copy. The complete serialized tool result has a 128 KiB UTF-8 hard
+budget. Three messages of 8000 four-byte Unicode characters fit intact. If
+JSON escaping makes a page exceed the budget, the tool returns a smaller whole
+prefix and a cursor; it never truncates message text.
+
+Acknowledgement remains atomic for the complete ID set and idempotently
+preserves the first acknowledgement timestamp.
+
 ## Mentor message content boundary
 
 Mentor content is limited to **8000 Unicode characters**. The shared
