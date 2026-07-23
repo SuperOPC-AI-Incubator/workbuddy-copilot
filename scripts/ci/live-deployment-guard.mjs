@@ -1,18 +1,26 @@
 import { createHash } from "node:crypto";
 
-function exactHttpsOrigin(value, label) {
+function exactOrigin(value, label, allowLocalHttp = false) {
+  if (!value) throw new Error(`${label} is required`);
   const url = new URL(value);
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
   if (
-    url.protocol !== "https:" ||
+    (url.protocol !== "https:" && !(allowLocalHttp && local && url.protocol === "http:")) ||
     url.username ||
     url.password ||
     url.pathname !== "/" ||
     url.search ||
     url.hash
   ) {
-    throw new Error(`${label} must be an exact HTTPS origin`);
+    throw new Error(`${label} must be an exact origin`);
   }
-  return url;
+  return { local, url };
+}
+
+function exactHttpsOrigin(value, label) {
+  const parsed = exactOrigin(value, label);
+  if (parsed.local) throw new Error(`${label} must be a remote HTTPS origin`);
+  return parsed.url;
 }
 
 function hostHash(url) {
@@ -58,8 +66,7 @@ export async function verifyLiveDeploymentBeforeWrite({
 
 export function isRemoteE2EOrigin(value) {
   if (!value) return false;
-  const url = new URL(value);
-  return url.hostname !== "localhost" && url.hostname !== "127.0.0.1";
+  return !exactOrigin(value, "E2E origin", true).local;
 }
 
 export async function runRequiredE2EAfterDeploymentGuard({
@@ -68,7 +75,14 @@ export async function runRequiredE2EAfterDeploymentGuard({
   write,
 }) {
   const appOrigin = environment.E2E_APP_ORIGIN;
-  if (!isRemoteE2EOrigin(appOrigin)) return write();
+  const appIsRemote = isRemoteE2EOrigin(appOrigin);
+  const supabaseIsRemote = !exactOrigin(environment.E2E_SUPABASE_URL, "E2E Supabase target", true)
+    .local;
+
+  if (appIsRemote !== supabaseIsRemote) {
+    throw new Error("E2E app and Supabase target must both be local or both be remote");
+  }
+  if (!appIsRemote) return write();
 
   if (environment.LIVE_PREDEPLOY_TEST_PROJECT !== "true") {
     throw new Error(

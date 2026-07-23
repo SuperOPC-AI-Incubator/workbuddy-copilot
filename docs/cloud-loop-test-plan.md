@@ -68,10 +68,13 @@ Development RED evidence for this change:
   to the configured E2E Supabase host hash. A missing or mismatched value stops
   the job before any page, browser fixture, or test user write.
   Both `run-required-playwright.mjs` and `run-e2e-negative-controls.mjs` repeat
-  this guard themselves whenever `E2E_APP_ORIGIN` is not exactly `localhost` or
-  `127.0.0.1`, so invoking either package script directly cannot bypass the
-  disposable-project flag or identity check. The workflow preflight remains
-  defense in depth.
+  this guard themselves. They bypass deployment identity only when the app
+  origin (or the runner's implicit local web server) and Supabase target are
+  both exact `localhost`/`127.0.0.1` origins. Mixed local/remote targets stop
+  before identity fetch, browser spawn, report write, or test-data write. A
+  remote app and remote Supabase target still require the disposable-project
+  flag and matching deployment identity. The workflow preflight remains defense
+  in depth.
 
 CI disables Playwright traces, screenshots, and video because those artifacts
 can contain typed passwords, authenticated page state, and Auth responses.
