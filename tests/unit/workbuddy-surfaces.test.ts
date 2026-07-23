@@ -29,12 +29,13 @@ describe("WorkBuddy SKILL generator", () => {
 
     expect(jsonBlock).toBeDefined();
     const parsed = ReliableWorkbuddyTurnSchema.parse(JSON.parse(jsonBlock!));
-    expect(parsed.source).toBe("skill");
+    expect(parsed.source).toBe("connector");
     expect(parsed.event_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
     expect(parsed.source_session_key).toBe("workbuddy-conversation-stable-key");
-    expect(skill).toContain("Authorization: Bearer <WORKBUDDY_CREDENTIAL>");
+    expect(skill).toContain("workbuddy-sync.mjs");
+    expect(skill).not.toMatch(/Authorization|Bearer|WORKBUDDY_CREDENTIAL/);
     expect(skill).toMatch(/每一轮.*新的 event_id/);
     expect(skill).toMatch(/重试.*同一个 event_id/);
     expect(skill).toMatch(/source_session_key.*同一段.*复用/);
@@ -45,8 +46,9 @@ describe("WorkBuddy SKILL generator", () => {
   });
 
   test("setup page no longer reads or renders the legacy plaintext token", () => {
-    expect(setupRoute).toMatch(/buildWorkbuddySkill/);
-    expect(setupRoute).toMatch(/重新安装|更新旧版/);
+    expect(setupRoute).not.toMatch(/buildWorkbuddySkill/);
+    expect(setupRoute).toMatch(/\/downloads\/SKILL\.md/);
+    expect(setupRoute).toMatch(/重新安装|更新旧版|旧版[\s\S]*更新|重新接入/);
     expect(setupRoute).toMatch(/接入凭证[\s\S]*?仅显示这一次/);
     expect(setupRoute).toMatch(/createWorkbuddyCredential/);
     expect(setupRoute).toMatch(/rotateWorkbuddyCredential/);

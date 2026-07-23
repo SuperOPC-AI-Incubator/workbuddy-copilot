@@ -1,5 +1,9 @@
 # Reliable mentor message delivery
 
+Clients without MCP use the durable cross-platform fallback described in
+[WorkBuddy fallback connector](workbuddy-connector.md). It preserves the same
+fetch-without-ack and next-completed-turn acknowledgement boundary.
+
 Mentor replies are persisted in `mentor_message_deliveries` when the trusted
 mentor timeline path creates them. Fetch and acknowledgement state lives in
 Supabase, so an application restart does not lose pending messages or reset

@@ -24,7 +24,7 @@
 | Credential service | Rotate                                        | New credential and revocation of all previous active credentials are one transaction                                              |
 | Credential service | Revoke twice                                  | Idempotent safe status; old token resolves as revoked                                                                             |
 | Credential service | Student-only authorization                    | Staff/non-student callers cannot list, issue, rotate, or revoke                                                                   |
-| Credential UI      | One-time display and Skill generation         | Token exists only in component memory, is not persisted in URL/storage/logs, and disappears on navigation/refresh                 |
+| Credential UI      | One-time display and connector handoff        | Token exists only in component memory, is not persisted in URL/storage/logs/Skill/command, and disappears on navigation/refresh   |
 | Database           | RPC grants and invariants                     | Service-role-only delivery RPCs; authenticated credential RPCs are absent; ownership joins and mentor-kind checks remain enforced |
 | Database           | Legacy plaintext removal                      | Legacy RPC and `students.workbuddy_token` are dropped after all source callers migrate                                            |
 

@@ -78,13 +78,23 @@ The old SKILL body used top-level `session` and `items` objects, with a `kind`
 on every timeline item. That shape is intentionally not accepted by the
 reliable endpoint. Because there is no production learner data to migrate,
 existing installations should delete or update the old SKILL and reinstall
-the reliable template from the WorkBuddy setup page.
+the token-free connector SKILL from the WorkBuddy setup page. MCP is preferred;
+the fallback connector owns the authorization header outside WorkBuddy. The
+installers now write the generated Skill directly to
+`$HOME/.workbuddy/skills/superbrain-sync/SKILL.md` on macOS/Linux or
+`%USERPROFILE%\.workbuddy\skills\superbrain-sync\SKILL.md` on Windows. Restart
+WorkBuddy afterward. If the current WorkBuddy version does not discover that
+path automatically, use **技能栏 → 导入** and select the installed file.
 
 The setup page now creates, rotates, and revokes a hash-only WorkBuddy
 credential. Plaintext is returned only by the successful create/rotate server
 call and is kept only in the current page's React state. Refreshing, leaving,
-or using the clear action makes it unrecoverable; a new Skill can then be
-installed only by rotating the credential.
+or using the clear action makes it unrecoverable. The user copies it once and
+pastes it into the installer's masked prompt. The installer passes it through
+standard input and stores it only in the current-user private connector
+configuration; the Skill, install command, events, queue, and render ledger
+never contain it. If installation was not completed, rotate the credential
+and retry.
 
 The database stores SHA-256, a short display prefix, lifecycle timestamps, and
 at most one active credential per student. `students.workbuddy_token` and the
@@ -93,3 +103,5 @@ temporary plaintext transition RPC were removed before deployment.
 Mentor replies are retrieved through the persistent delivery API documented in
 [`workbuddy-delivery.md`](workbuddy-delivery.md). It uses the same bearer
 credential and does not depend on the web process retaining any state.
+Non-MCP installation and crash recovery are documented in
+[`workbuddy-connector.md`](workbuddy-connector.md).
