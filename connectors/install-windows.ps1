@@ -3,6 +3,7 @@ param(
   [ValidateSet("Install", "Upgrade", "Uninstall")]
   [string]$Action = "Install",
   [string]$ApiUrl,
+  [switch]$CredentialFromStdin,
   [switch]$NoSchedule
 )
 
@@ -101,10 +102,22 @@ Set-PrivateFileAcl -Path $InstalledSkill
 
 $configPath = Join-Path $StateRoot "config.json"
 if (-not (Test-Path -LiteralPath $configPath)) {
-  $secureCredential = Read-Host "Paste the one-time WorkBuddy credential" -AsSecureString
-  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureCredential)
+  $bstr = [IntPtr]::Zero
   try {
-    $plainCredential = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    if ($CredentialFromStdin) {
+      if (-not [Console]::IsInputRedirected) {
+        throw "-CredentialFromStdin requires redirected standard input."
+      }
+      $plainCredential = [Console]::In.ReadLine()
+    }
+    else {
+      $secureCredential = Read-Host "Paste the one-time WorkBuddy credential" -AsSecureString
+      $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureCredential)
+      $plainCredential = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    }
+    if ([string]::IsNullOrWhiteSpace($plainCredential)) {
+      throw "Credential input is required."
+    }
     $plainCredential | & $node $Connector configure --api-url $ApiUrl --token-stdin
     if ($LASTEXITCODE -ne 0) {
       throw "Connector configuration failed."
@@ -114,7 +127,13 @@ if (-not (Test-Path -LiteralPath $configPath)) {
     if ($null -ne $plainCredential) {
       $plainCredential = $null
     }
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    if ($null -ne $secureCredential) {
+      $secureCredential.Dispose()
+      $secureCredential = $null
+    }
+    if ($bstr -ne [IntPtr]::Zero) {
+      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
   }
 }
 Set-PrivateFileAcl -Path $configPath

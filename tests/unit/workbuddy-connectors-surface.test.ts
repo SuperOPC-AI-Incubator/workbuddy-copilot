@@ -113,6 +113,10 @@ describe("fallback connector installers", () => {
   test("Windows installer uses SecureString/stdin, current-user ACL, and an idempotent user task", async () => {
     const source = await readFile(windowsInstaller, "utf8");
     expect(source).toMatch(/Read-Host[\s\S]*-AsSecureString/);
+    expect(source).toMatch(/\[switch\]\$CredentialFromStdin/);
+    expect(source).toMatch(
+      /if\s*\(\$CredentialFromStdin\)[\s\S]*\[Console\]::IsInputRedirected[\s\S]*\[Console\]::In\.ReadLine\(\)[\s\S]*else\s*\{[\s\S]*Read-Host[\s\S]*-AsSecureString/i,
+    );
     expect(source).toMatch(/--token-stdin/);
     expect(source).toMatch(/icacls[\s\S]*\/inheritance:r/i);
     expect(source).toMatch(/ScheduledTask[\s\S]*(Register|Set)-ScheduledTask/i);

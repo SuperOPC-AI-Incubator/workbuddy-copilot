@@ -31,19 +31,37 @@ try {
       $Installer,
       "-ApiUrl",
       "https://copilot.example.test",
+      "-CredentialFromStdin",
       "-NoSchedule"
     )) {
     $start.ArgumentList.Add($argument)
   }
+  $start.Environment.Remove("CONNECTOR_TEST_TOKEN") | Out-Null
 
   $process = [Diagnostics.Process]::Start($start)
-  $process.StandardInput.WriteLine($env:CONNECTOR_TEST_TOKEN)
-  $process.StandardInput.Close()
-  $stdout = $process.StandardOutput.ReadToEnd()
-  $stderr = $process.StandardError.ReadToEnd()
-  $process.WaitForExit()
-  if ($process.ExitCode -ne 0) {
-    throw "Windows connector installer failed with exit code $($process.ExitCode)."
+  $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+  $stderrTask = $process.StandardError.ReadToEndAsync()
+  try {
+    $process.StandardInput.WriteLine($env:CONNECTOR_TEST_TOKEN)
+    $process.StandardInput.Close()
+    if (-not $process.WaitForExit(60000)) {
+      $process.Kill($true)
+      $process.WaitForExit()
+      throw "Windows connector installer exceeded the 60-second test deadline."
+    }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $exitCode = $process.ExitCode
+  }
+  finally {
+    if (-not $process.HasExited) {
+      $process.Kill($true)
+      $process.WaitForExit()
+    }
+    $process.Dispose()
+  }
+  if ($exitCode -ne 0) {
+    throw "Windows connector installer failed with exit code $exitCode."
   }
   if ($stdout.Contains($env:CONNECTOR_TEST_TOKEN) -or $stderr.Contains($env:CONNECTOR_TEST_TOKEN)) {
     throw "Windows connector installer output leaked credential material."
