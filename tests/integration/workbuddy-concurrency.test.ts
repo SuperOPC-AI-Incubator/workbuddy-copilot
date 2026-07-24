@@ -206,121 +206,124 @@ describe.skipIf(missingConfiguration !== null)(
       }
     }, 60_000);
 
-    test("serializes fetch and reverse-UUID acknowledgement without a delivery deadlock", async () => {
-      const firstClient = createClient<Database>(testUrl!, serviceRoleKey!, {
-        auth: { persistSession: false },
-      });
-      const secondClient = createClient<Database>(testUrl!, serviceRoleKey!, {
-        auth: { persistSession: false },
-      });
-      const eventId = crypto.randomUUID();
-      const sourceSessionKey = `vitest-delivery-lock-${eventId}`;
-      const uuidStem = eventId.slice(0, -12);
-      const earlierHighId = `${uuidStem}ffffffffffff`;
-      const laterLowId = `${uuidStem}000000000001`;
-      let sessionId: string | null = null;
-
-      try {
-        const staff = await firstClient
-          .from("staff_accounts")
-          .select("user_id")
-          .eq("is_active", true)
-          .eq("must_change_password", false)
-          .limit(1)
-          .single();
-        expect(staff.error).toBeNull();
-        expect(staff.data?.user_id).toBeTruthy();
-
-        const ingest = await firstClient.rpc("ingest_workbuddy_turn", {
-          _event_id: eventId,
-          _student_id: studentId!,
-          _source: "mcp",
-          _source_session_key: sourceSessionKey,
-          _session_title: "Delivery lock order contract",
-          _payload_sha256: "c".repeat(64),
-          _prompt: "Create an isolated session for delivery locking",
-          _reply: "The session is ready",
+    test.each(Array.from({ length: CONCURRENCY_ROUNDS }, (_, round) => round))(
+      "smokes concurrent fetch and reverse-UUID acknowledgement without loss or a delivery deadlock (round %i)",
+      async (round) => {
+        const firstClient = createClient<Database>(testUrl!, serviceRoleKey!, {
+          auth: { persistSession: false },
         });
-        expect(ingest.error).toBeNull();
-        sessionId = asRecord(ingest.data).session_id as string;
-        expect(sessionId).toBeTruthy();
+        const secondClient = createClient<Database>(testUrl!, serviceRoleKey!, {
+          auth: { persistSession: false },
+        });
+        const eventId = crypto.randomUUID();
+        const sourceSessionKey = `vitest-delivery-lock-${round}-${eventId}`;
+        const uuidStem = eventId.slice(0, -12);
+        const earlierHighId = `${uuidStem}ffffffffffff`;
+        const laterLowId = `${uuidStem}000000000001`;
+        let sessionId: string | null = null;
 
-        const baseTime = Date.now() - 10_000;
-        const inserted = await firstClient.from("timeline_items").insert([
-          {
-            id: earlierHighId,
-            session_id: sessionId,
-            kind: "mentor",
-            text: "Earlier created_at, higher UUID",
-            author_id: staff.data!.user_id,
-            created_at: new Date(baseTime).toISOString(),
-          },
-          {
-            id: laterLowId,
-            session_id: sessionId,
-            kind: "mentor",
-            text: "Later created_at, lower UUID",
-            author_id: staff.data!.user_id,
-            created_at: new Date(baseTime + 1_000).toISOString(),
-          },
-        ]);
-        expect(inserted.error).toBeNull();
-        expect(earlierHighId > laterLowId).toBe(true);
+        try {
+          const staff = await firstClient
+            .from("staff_accounts")
+            .select("user_id")
+            .eq("is_active", true)
+            .eq("must_change_password", false)
+            .limit(1)
+            .single();
+          expect(staff.error).toBeNull();
+          expect(staff.data?.user_id).toBeTruthy();
 
-        const [fetched, acknowledged] = await launchTogether(
-          () =>
-            firstClient.rpc("fetch_workbuddy_mentor_messages", {
-              _student_id: studentId!,
-              _session_id: sessionId,
-              _limit: 100,
-              _cursor_created_at: null,
-              _cursor_id: null,
-            }),
-          () =>
-            secondClient.rpc("ack_workbuddy_mentor_messages", {
-              _student_id: studentId!,
-              _message_ids: [laterLowId, earlierHighId],
-            }),
-        );
+          const ingest = await firstClient.rpc("ingest_workbuddy_turn", {
+            _event_id: eventId,
+            _student_id: studentId!,
+            _source: "mcp",
+            _source_session_key: sourceSessionKey,
+            _session_title: `Delivery lock order contract ${round}`,
+            _payload_sha256: "c".repeat(64),
+            _prompt: "Create an isolated session for delivery locking",
+            _reply: "The session is ready",
+          });
+          expect(ingest.error).toBeNull();
+          sessionId = asRecord(ingest.data).session_id as string;
+          expect(sessionId).toBeTruthy();
 
-        expect(fetched.error).toBeNull();
-        expect(acknowledged.error).toBeNull();
-        const fetchedIds = ((asRecord(fetched.data).messages ?? []) as Json[]).map(
-          (message) => (message as Record<string, Json>).id,
-        );
-        expect([[], [earlierHighId, laterLowId]]).toContainEqual(fetchedIds);
+          const baseTime = Date.now() - 10_000;
+          const inserted = await firstClient.from("timeline_items").insert([
+            {
+              id: earlierHighId,
+              session_id: sessionId,
+              kind: "mentor",
+              text: "Earlier created_at, higher UUID",
+              author_id: staff.data!.user_id,
+              created_at: new Date(baseTime).toISOString(),
+            },
+            {
+              id: laterLowId,
+              session_id: sessionId,
+              kind: "mentor",
+              text: "Later created_at, lower UUID",
+              author_id: staff.data!.user_id,
+              created_at: new Date(baseTime + 1_000).toISOString(),
+            },
+          ]);
+          expect(inserted.error).toBeNull();
+          expect(earlierHighId > laterLowId).toBe(true);
 
-        const deliveries = await firstClient
-          .from("mentor_message_deliveries")
-          .select("message_id, fetch_count, first_fetched_at, acknowledged_at")
-          .in("message_id", [earlierHighId, laterLowId])
-          .order("message_id");
-        expect(deliveries.error).toBeNull();
-        expect(deliveries.data).toHaveLength(2);
-        expect(deliveries.data?.every(({ acknowledged_at }) => acknowledged_at !== null)).toBe(
-          true,
-        );
-        const fetchCounts = deliveries.data?.map(({ fetch_count }) => fetch_count) ?? [];
-        expect(new Set(fetchCounts).size).toBe(1);
-        expect([0, 1]).toContain(fetchCounts[0]);
-        expect(
-          deliveries.data?.every(({ fetch_count, first_fetched_at }) =>
-            fetch_count === 0 ? first_fetched_at === null : first_fetched_at !== null,
-          ),
-        ).toBe(true);
-      } finally {
-        await firstClient.from("timeline_items").delete().in("id", [earlierHighId, laterLowId]);
-        await firstClient.from("timeline_items").delete().eq("source_event_id", eventId);
-        await firstClient.from("workbuddy_ingest_events").delete().eq("event_id", eventId);
-        if (sessionId) {
-          await firstClient
-            .from("sessions")
-            .delete()
-            .eq("id", sessionId)
-            .eq("student_id", studentId!);
+          const [fetched, acknowledged] = await launchTogether(
+            () =>
+              firstClient.rpc("fetch_workbuddy_mentor_messages", {
+                _student_id: studentId!,
+                _session_id: sessionId,
+                _limit: 100,
+                _cursor_created_at: null,
+                _cursor_id: null,
+              }),
+            () =>
+              secondClient.rpc("ack_workbuddy_mentor_messages", {
+                _student_id: studentId!,
+                _message_ids: [laterLowId, earlierHighId],
+              }),
+          );
+
+          expect(fetched.error).toBeNull();
+          expect([null, "P4040"]).toContain(acknowledged.error?.code ?? null);
+          const fetchedIds = ((asRecord(fetched.data).messages ?? []) as Json[]).map(
+            (message) => (message as Record<string, Json>).id,
+          );
+          expect(fetchedIds).toEqual([earlierHighId, laterLowId]);
+
+          const deliveries = await firstClient
+            .from("mentor_message_deliveries")
+            .select("message_id, fetch_count, first_fetched_at, acknowledged_at")
+            .in("message_id", [earlierHighId, laterLowId])
+            .order("message_id");
+          expect(deliveries.error).toBeNull();
+          expect(deliveries.data).toHaveLength(2);
+          expect(deliveries.data?.every(({ fetch_count }) => fetch_count === 1)).toBe(true);
+          expect(deliveries.data?.every(({ first_fetched_at }) => first_fetched_at !== null)).toBe(
+            true,
+          );
+          const acknowledgementWasAccepted = acknowledged.error === null;
+          expect(
+            deliveries.data?.every(
+              ({ acknowledged_at }) => (acknowledged_at !== null) === acknowledgementWasAccepted,
+            ),
+          ).toBe(true);
+        } finally {
+          await firstClient.from("timeline_items").delete().in("id", [earlierHighId, laterLowId]);
+          await firstClient.from("timeline_items").delete().eq("source_event_id", eventId);
+          await firstClient.from("workbuddy_ingest_events").delete().eq("event_id", eventId);
+          if (sessionId) {
+            await firstClient
+              .from("sessions")
+              .delete()
+              .eq("id", sessionId)
+              .eq("student_id", studentId!);
+          }
         }
-      }
-    }, 60_000);
+      },
+      60_000,
+    );
 
     test("completes a fetch racing a timeline cascade delete without a lock cycle", async () => {
       const fetchClient = createClient<Database>(testUrl!, serviceRoleKey!, {

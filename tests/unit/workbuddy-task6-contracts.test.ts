@@ -6,6 +6,10 @@ const migration = readFileSync(
   resolve(process.cwd(), "supabase/migrations/20260723090300_reliable_delivery.sql"),
   "utf8",
 );
+const ackFetchGuardMigration = readFileSync(
+  resolve(process.cwd(), "supabase/migrations/20260724010000_require_fetch_before_ack.sql"),
+  "utf8",
+);
 const credentialFunctions = readFileSync(
   resolve(process.cwd(), "src/lib/workbuddy/credentials.functions.ts"),
   "utf8",
@@ -98,6 +102,53 @@ describe("Task 6 database safety contracts", () => {
     expect(ack).toMatch(/student_id\s*=\s*_student_id/i);
     expect(ack).toMatch(
       /acknowledged_at\s*=\s*COALESCE\s*\(\s*delivery\.acknowledged_at\s*,\s*pg_catalog\.now\(\)\s*\)/i,
+    );
+  });
+
+  test("forward migration rejects acknowledgement until the complete owned set was fetched", () => {
+    const tableLock = ackFetchGuardMigration.search(
+      /LOCK\s+TABLE\s+public\.mentor_message_deliveries\s+IN\s+ACCESS\s+EXCLUSIVE\s+MODE/i,
+    );
+    const legacyRepair = ackFetchGuardMigration.search(
+      /UPDATE\s+public\.mentor_message_deliveries[\s\S]*?SET\s+acknowledged_at\s*=\s*NULL[\s\S]*?acknowledged_at\s+IS\s+NOT\s+NULL[\s\S]*?first_fetched_at\s+IS\s+NULL/i,
+    );
+    const constraint = ackFetchGuardMigration.search(
+      /ADD\s+CONSTRAINT\s+mentor_message_deliveries_ack_requires_fetch_check/i,
+    );
+
+    expect(tableLock).toBeGreaterThanOrEqual(0);
+    expect(legacyRepair).toBeGreaterThan(tableLock);
+    expect(constraint).toBeGreaterThan(legacyRepair);
+    expect(ackFetchGuardMigration).toMatch(
+      /ADD\s+CONSTRAINT\s+mentor_message_deliveries_ack_requires_fetch_check[\s\S]*?acknowledged_at\s+IS\s+NULL[\s\S]*?first_fetched_at\s+IS\s+NOT\s+NULL/i,
+    );
+
+    const ackFunction = ackFetchGuardMigration.slice(
+      ackFetchGuardMigration.search(
+        /CREATE\s+OR\s+REPLACE\s+FUNCTION\s+public\.ack_workbuddy_mentor_messages\s*\(/i,
+      ),
+    );
+    const eligibleCount = ackFunction.search(
+      /SELECT\s+pg_catalog\.count\(\*\)[\s\S]*?delivery\.student_id\s*=\s*_student_id[\s\S]*?delivery\.first_fetched_at\s+IS\s+NOT\s+NULL/i,
+    );
+    const completeSetCheck = ackFunction.search(
+      /eligible_count\s*<>\s*pg_catalog\.cardinality\(\s*_message_ids\s*\)/i,
+    );
+    const acknowledgementUpdate = ackFunction.search(
+      /UPDATE\s+public\.mentor_message_deliveries[\s\S]*?delivery\.first_fetched_at\s+IS\s+NOT\s+NULL/i,
+    );
+    const studentLock = ackFunction.search(/private\.lock_workbuddy_delivery_student/i);
+    const firstRowLockOrWrite = ackFunction.search(
+      /FOR\s+UPDATE|UPDATE\s+public\.mentor_message_deliveries/i,
+    );
+
+    expect(eligibleCount).toBeGreaterThanOrEqual(0);
+    expect(completeSetCheck).toBeGreaterThan(eligibleCount);
+    expect(acknowledgementUpdate).toBeGreaterThan(completeSetCheck);
+    expect(studentLock).toBeGreaterThanOrEqual(0);
+    expect(firstRowLockOrWrite).toBeGreaterThan(studentLock);
+    expect(ackFunction).toMatch(
+      /ERRCODE\s*=\s*'P4040'[\s\S]*?MESSAGE\s*=\s*'workbuddy_delivery_not_owned'/i,
     );
   });
 

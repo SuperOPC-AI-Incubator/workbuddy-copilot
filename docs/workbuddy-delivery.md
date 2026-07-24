@@ -131,7 +131,9 @@ Content-Type: application/json
 ```
 
 The array must contain 1–100 unique UUIDs. The database locks and validates
-the complete set before updating anything. A mixed own/foreign/unknown set
+the complete set before updating anything. Every message must both belong to
+the credential student and have completed at least one fetch. A known owned ID
+that has not been fetched, or a mixed fetched/unfetched/foreign/unknown set,
 returns the same `400 INVALID_MESSAGE_IDS` response and makes no partial
 update. Repeating a valid acknowledgement succeeds and preserves the first
 `acknowledged_at`.
@@ -181,7 +183,12 @@ JSON escaping makes a page exceed the budget, the tool returns a smaller whole
 prefix and a cursor; it never truncates message text.
 
 Acknowledgement remains atomic for the complete ID set and idempotently
-preserves the first acknowledgement timestamp.
+preserves the first acknowledgement timestamp. A table constraint also rejects
+any write that would create an acknowledged delivery without a first-fetch
+timestamp. During upgrade, the migration briefly locks delivery writes and
+requeues any legacy acknowledged-without-fetch rows as pending; this favors a
+possible repeat over permanently losing a message whose display was never
+proven.
 
 ## Mentor message content boundary
 

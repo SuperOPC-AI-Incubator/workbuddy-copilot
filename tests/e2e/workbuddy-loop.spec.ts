@@ -130,6 +130,28 @@ test.describe("WorkBuddy cloud delivery loop", () => {
       await studentContext.close();
     }
 
+    const messageId = await harness.readTimelineItemId(sessionId, mentorReply);
+    await expect(harness.readDelivery(messageId)).resolves.toMatchObject({
+      fetchCount: 0,
+      acknowledged: false,
+      studentId: student.studentId,
+      sessionId,
+    });
+
+    const beforeFetchAck = await harness.publicJson("/api/public/workbuddy/mentor-messages/ack", {
+      method: "POST",
+      token: student.token,
+      body: { message_ids: [messageId] },
+    });
+    expect(beforeFetchAck.status).toBe(400);
+    expect(beforeFetchAck.body).toMatchObject({
+      error: { code: "INVALID_MESSAGE_IDS" },
+    });
+    await expect(harness.readDelivery(messageId)).resolves.toMatchObject({
+      fetchCount: 0,
+      acknowledged: false,
+    });
+
     const firstFetch = await harness.publicJson(
       `/api/public/workbuddy/mentor-messages?session_id=${sessionId}`,
       { method: "GET", token: student.token },
@@ -151,7 +173,7 @@ test.describe("WorkBuddy cloud delivery loop", () => {
     const firstMessages = firstFetch.body.messages as DeliveredMentorMessage[];
     expect(firstMessages).toHaveLength(1);
     expect(firstMessages[0]?.fetch_count).toBe(1);
-    const messageId = String(firstMessages[0]?.id);
+    expect(String(firstMessages[0]?.id)).toBe(messageId);
     expect(
       firstMessages.map(({ id }) => id),
       negativeMarker,

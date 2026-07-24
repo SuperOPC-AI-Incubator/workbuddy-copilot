@@ -19,6 +19,7 @@
     "test:e2e:local": "node scripts/ci/run-required-playwright.mjs",
     "test:e2e:negative-control": "node scripts/ci/run-e2e-negative-controls.mjs",
     "test:integration:required": "node scripts/ci/run-required-vitest.mjs",
+    "test:db:upgrade": "node scripts/ci/run-ack-fetch-upgrade-test.mjs",
     "test:connectors": "vitest run tests/unit/workbuddy-connector.test.ts tests/unit/workbuddy-connectors-surface.test.ts",
     "test:connectors:posix": "sh tests/connectors/test-posix.sh",
     "test:connectors:windows": "pwsh -NoLogo -NoProfile -File tests/connectors/test-windows.ps1",

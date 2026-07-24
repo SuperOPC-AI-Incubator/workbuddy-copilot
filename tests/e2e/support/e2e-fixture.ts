@@ -123,6 +123,7 @@ export type E2EHarness = {
     userId: string,
   ): Promise<{ active: boolean; mustChangePassword: boolean; roles: string[] }>;
   timelineContains(sessionId: string, text: string): Promise<boolean>;
+  readTimelineItemId(sessionId: string, text: string): Promise<string>;
   publicJson(
     path: string,
     input: { method: "GET" | "POST"; token: string; body?: unknown },
@@ -340,6 +341,19 @@ export async function createE2EHarness(): Promise<E2EHarness> {
     return result.count === 1;
   }
 
+  async function readTimelineItemId(sessionId: string, text: string): Promise<string> {
+    const result = await client
+      .from("timeline_items")
+      .select("id")
+      .eq("session_id", sessionId)
+      .eq("kind", "mentor")
+      .eq("text", text)
+      .single();
+    assertNoError(result.error, "timeline item lookup");
+    if (!result.data) throw new Error("E2E fixture timeline item lookup returned no row");
+    return result.data.id;
+  }
+
   async function publicJson(
     path: string,
     input: { method: "GET" | "POST"; token: string; body?: unknown },
@@ -419,6 +433,7 @@ export async function createE2EHarness(): Promise<E2EHarness> {
     readStudentIdentity,
     readStaffState,
     timelineContains,
+    readTimelineItemId,
     publicJson,
     readDelivery,
     cleanup,

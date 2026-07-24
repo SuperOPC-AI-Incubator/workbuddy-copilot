@@ -76,6 +76,8 @@ jobs:
         run: node scripts/ci/export-local-supabase-env.mjs "$GITHUB_ENV"
       - name: Run pgTAP database contracts
         run: supabase test db
+      - name: Run ACK fetch forward-upgrade fixture
+        run: bun run test:db:upgrade
       - name: Seed isolated concurrency identities
         run: node scripts/ci/seed-local-integration.mjs "$GITHUB_ENV"
       - name: Run real concurrency tests with zero skips

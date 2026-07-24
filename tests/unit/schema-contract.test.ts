@@ -1224,7 +1224,7 @@ describe("cloud integration schema contract", () => {
   });
 
   test("keeps pgTAP coverage for canonical staff identities and trusted password completion", () => {
-    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*126\s*\)/i);
+    expect(pgTap).toMatch(/SELECT\s+plan\s*\(\s*135\s*\)/i);
     expect(pgTap).toMatch(/rejects uppercase staff usernames/i);
     expect(pgTap).toMatch(/rejects fullwidth staff usernames/i);
     expect(pgTap).toMatch(/rejects out-of-range staff usernames/i);

@@ -3,7 +3,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
 SET LOCAL search_path = public, extensions, pg_catalog;
 
-SELECT plan(126);
+SELECT plan(135);
 
 CREATE TEMP TABLE cloud_test_results (
   label text PRIMARY KEY,
@@ -2469,6 +2469,252 @@ SELECT ok(
     WHERE first.label = 'delivery_cursor_first'
   ),
   'composite cursor retains messages that share an identical timestamp'
+);
+
+INSERT INTO cloud_test_results (label, result)
+VALUES (
+  'ack_fetch_guard_ingest',
+  public.ingest_workbuddy_turn(
+    _event_id => '20000000-0000-0000-0000-000000000011'::uuid,
+    _student_id => (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    _source => 'mcp',
+    _source_session_key => 'ack-fetch-guard-session',
+    _session_title => 'ACK fetch guard',
+    _payload_sha256 => pg_catalog.repeat('e', 64),
+    _prompt => 'Create an isolated ACK fetch guard session',
+    _reply => 'The isolated session is ready'
+  )
+);
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'ack_fetch_guard_message',
+  public.create_mentor_message(
+    _author_user_id => '10000000-0000-0000-0000-000000000101'::uuid,
+    _session_id => (ingest.result ->> 'session_id')::uuid,
+    _text => 'This message must be fetched before acknowledgement'
+  )
+FROM cloud_test_results AS ingest
+WHERE ingest.label = 'ack_fetch_guard_ingest';
+
+SELECT throws_ok(
+  $test$
+    SELECT public.ack_workbuddy_mentor_messages(
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      ARRAY[
+        (
+          SELECT (result ->> 'message_id')::uuid
+          FROM cloud_test_results
+          WHERE label = 'student_one_message'
+        ),
+        (
+          SELECT (result ->> 'message_id')::uuid
+          FROM cloud_test_results
+          WHERE label = 'ack_fetch_guard_message'
+        )
+      ]
+    )
+  $test$,
+  'P4040',
+  'workbuddy_delivery_not_owned',
+  'mixed fetched and unfetched acknowledgement IDs fail as one request'
+);
+
+SELECT ok(
+  (
+    SELECT pg_catalog.bool_and(delivery.acknowledged_at IS NULL)
+    FROM public.mentor_message_deliveries AS delivery
+    WHERE delivery.message_id IN (
+      SELECT (result ->> 'message_id')::uuid
+      FROM cloud_test_results
+      WHERE label IN ('student_one_message', 'ack_fetch_guard_message')
+    )
+  ),
+  'mixed fetched and unfetched acknowledgement failure makes no partial update'
+);
+
+SELECT throws_ok(
+  $test$
+    SELECT public.ack_workbuddy_mentor_messages(
+      (
+        SELECT id
+        FROM public.students
+        WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+      ),
+      ARRAY[
+        (
+          SELECT (result ->> 'message_id')::uuid
+          FROM cloud_test_results
+          WHERE label = 'ack_fetch_guard_message'
+        )
+      ]
+    )
+  $test$,
+  'P4040',
+  'workbuddy_delivery_not_owned',
+  'owned but unfetched message cannot be acknowledged by known ID'
+);
+
+SELECT ok(
+  (
+    SELECT
+      delivery.first_fetched_at IS NULL
+      AND delivery.last_fetched_at IS NULL
+      AND delivery.fetch_count = 0
+      AND delivery.acknowledged_at IS NULL
+    FROM public.mentor_message_deliveries AS delivery
+    JOIN cloud_test_results AS message_result
+      ON delivery.message_id = (message_result.result ->> 'message_id')::uuid
+    WHERE message_result.label = 'ack_fetch_guard_message'
+  ),
+  'rejected acknowledgement leaves an unfetched delivery pending'
+);
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'ack_fetch_guard_first_fetch',
+  public.fetch_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    (ingest.result ->> 'session_id')::uuid,
+    100,
+    NULL,
+    NULL
+  )
+FROM cloud_test_results AS ingest
+WHERE ingest.label = 'ack_fetch_guard_ingest';
+
+SELECT ok(
+  (
+    SELECT
+      pg_catalog.jsonb_array_length(fetched.result -> 'messages') = 1
+      AND fetched.result -> 'messages' -> 0 ->> 'id'
+        = message_result.result ->> 'message_id'
+      AND fetched.result -> 'messages' -> 0 ->> 'first_fetched_at' IS NOT NULL
+      AND (fetched.result -> 'messages' -> 0 ->> 'fetch_count')::integer = 1
+    FROM cloud_test_results AS fetched
+    JOIN cloud_test_results AS message_result
+      ON message_result.label = 'ack_fetch_guard_message'
+    WHERE fetched.label = 'ack_fetch_guard_first_fetch'
+  ),
+  'first fetch makes the guarded pending message eligible for acknowledgement'
+);
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'ack_fetch_guard_repeat_fetch',
+  public.fetch_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    (ingest.result ->> 'session_id')::uuid,
+    100,
+    NULL,
+    NULL
+  )
+FROM cloud_test_results AS ingest
+WHERE ingest.label = 'ack_fetch_guard_ingest';
+
+SELECT ok(
+  (
+    SELECT
+      repeated.result -> 'messages' -> 0 ->> 'id'
+        = first.result -> 'messages' -> 0 ->> 'id'
+      AND repeated.result -> 'messages' -> 0 ->> 'first_fetched_at'
+        = first.result -> 'messages' -> 0 ->> 'first_fetched_at'
+      AND (repeated.result -> 'messages' -> 0 ->> 'fetch_count')::integer = 2
+    FROM cloud_test_results AS first
+    JOIN cloud_test_results AS repeated
+      ON repeated.label = 'ack_fetch_guard_repeat_fetch'
+    WHERE first.label = 'ack_fetch_guard_first_fetch'
+  ),
+  'repeat fetch preserves the first timestamp before acknowledgement'
+);
+
+INSERT INTO cloud_test_results (label, result)
+SELECT
+  'ack_fetch_guard_first_ack',
+  public.ack_workbuddy_mentor_messages(
+    (
+      SELECT id
+      FROM public.students
+      WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+    ),
+    ARRAY[(message_result.result ->> 'message_id')::uuid]
+  )
+FROM cloud_test_results AS message_result
+WHERE message_result.label = 'ack_fetch_guard_message';
+
+SELECT ok(
+  (
+    SELECT
+      pg_catalog.jsonb_array_length(acknowledged.result -> 'acknowledged') = 1
+      AND acknowledged.result -> 'acknowledged' -> 0 ->> 'id'
+        = message_result.result ->> 'message_id'
+      AND acknowledged.result -> 'acknowledged' -> 0 ->> 'acknowledged_at' IS NOT NULL
+    FROM cloud_test_results AS acknowledged
+    JOIN cloud_test_results AS message_result
+      ON message_result.label = 'ack_fetch_guard_message'
+    WHERE acknowledged.label = 'ack_fetch_guard_first_ack'
+  ),
+  'fetched owned message can be acknowledged'
+);
+
+SELECT is(
+  (
+    SELECT
+      public.ack_workbuddy_mentor_messages(
+        (
+          SELECT id
+          FROM public.students
+          WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+        ),
+        ARRAY[(message_result.result ->> 'message_id')::uuid]
+      ) -> 'acknowledged' -> 0 ->> 'acknowledged_at'
+    FROM cloud_test_results AS message_result
+    WHERE message_result.label = 'ack_fetch_guard_message'
+  ),
+  (
+    SELECT result -> 'acknowledged' -> 0 ->> 'acknowledged_at'
+    FROM cloud_test_results
+    WHERE label = 'ack_fetch_guard_first_ack'
+  ),
+  'repeated acknowledgement preserves the first guarded acknowledgement timestamp'
+);
+
+SELECT is(
+  (
+    SELECT pg_catalog.jsonb_array_length(
+      public.fetch_workbuddy_mentor_messages(
+        (
+          SELECT id
+          FROM public.students
+          WHERE user_id = '10000000-0000-0000-0000-000000000001'::uuid
+        ),
+        (ingest.result ->> 'session_id')::uuid,
+        100,
+        NULL,
+        NULL
+      ) -> 'messages'
+    )
+    FROM cloud_test_results AS ingest
+    WHERE ingest.label = 'ack_fetch_guard_ingest'
+  ),
+  0,
+  'acknowledged guarded message is no longer fetched'
 );
 
 SELECT throws_ok(
