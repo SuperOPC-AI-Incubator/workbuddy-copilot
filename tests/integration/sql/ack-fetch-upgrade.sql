@@ -1,19 +1,48 @@
-BEGIN;
-
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '30s';
+SET lock_timeout = '5s';
+SET statement_timeout = '30s';
 
 CREATE EXTENSION IF NOT EXISTS pgtap WITH SCHEMA extensions;
-SET LOCAL search_path = public, extensions, pg_catalog;
+SET search_path = public, extensions, pg_catalog;
 
 SELECT plan(7);
 
 CREATE TEMP TABLE ack_fetch_upgrade_results (
   label text PRIMARY KEY,
   result jsonb NOT NULL
-) ON COMMIT DROP;
+) ON COMMIT PRESERVE ROWS;
 
 GRANT SELECT, INSERT ON TABLE ack_fetch_upgrade_results TO service_role;
+
+DELETE FROM auth.users
+WHERE id IN (
+  '91000000-0000-0000-0000-000000000001'::uuid,
+  '91000000-0000-0000-0000-000000000101'::uuid
+);
+
+DO $fixture$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_constraint AS constraint_row
+    WHERE constraint_row.conrelid =
+      'public.mentor_message_deliveries'::regclass
+      AND constraint_row.conname =
+        'mentor_message_deliveries_ack_requires_fetch_check'
+  ) THEN
+    UPDATE public.mentor_message_deliveries
+    SET acknowledged_at = NULL
+    WHERE acknowledged_at IS NOT NULL
+      AND first_fetched_at IS NULL;
+
+    ALTER TABLE public.mentor_message_deliveries
+      ADD CONSTRAINT mentor_message_deliveries_ack_requires_fetch_check
+      CHECK (
+        acknowledged_at IS NULL
+        OR first_fetched_at IS NOT NULL
+      );
+  END IF;
+END;
+$fixture$;
 
 INSERT INTO auth.users (
   id,
@@ -35,7 +64,7 @@ VALUES
     '{"account_kind":"staff"}'::jsonb
   );
 
-SET LOCAL ROLE service_role;
+SET ROLE service_role;
 
 SELECT public.bootstrap_staff_account(
   _user_id => '91000000-0000-0000-0000-000000000101'::uuid,
@@ -142,7 +171,7 @@ SELECT throws_ok(
   'validated constraint rejects direct acknowledged-before-fetch writes'
 );
 
-SET LOCAL ROLE service_role;
+SET ROLE service_role;
 
 SELECT throws_ok(
   $test$
@@ -216,4 +245,3 @@ SELECT lives_ok(
 RESET ROLE;
 
 SELECT * FROM finish();
-ROLLBACK;

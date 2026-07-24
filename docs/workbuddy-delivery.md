@@ -188,7 +188,9 @@ any write that would create an acknowledged delivery without a first-fetch
 timestamp. During upgrade, the migration briefly locks delivery writes and
 requeues any legacy acknowledged-without-fetch rows as pending; this favors a
 possible repeat over permanently losing a message whose display was never
-proven.
+proven. The migration explicitly wraps the lock, repair, validated constraint,
+RPC replacement, and grants in one transaction because PostgreSQL rejects
+`LOCK TABLE` outside a transaction block.
 
 ## Mentor message content boundary
 

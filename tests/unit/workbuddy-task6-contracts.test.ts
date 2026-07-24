@@ -106,6 +106,7 @@ describe("Task 6 database safety contracts", () => {
   });
 
   test("forward migration rejects acknowledgement until the complete owned set was fetched", () => {
+    const transactionBegin = ackFetchGuardMigration.search(/^\s*BEGIN\s*;/im);
     const tableLock = ackFetchGuardMigration.search(
       /LOCK\s+TABLE\s+public\.mentor_message_deliveries\s+IN\s+ACCESS\s+EXCLUSIVE\s+MODE/i,
     );
@@ -115,10 +116,17 @@ describe("Task 6 database safety contracts", () => {
     const constraint = ackFetchGuardMigration.search(
       /ADD\s+CONSTRAINT\s+mentor_message_deliveries_ack_requires_fetch_check/i,
     );
+    const serviceRoleGrant = ackFetchGuardMigration.search(
+      /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+public\.ack_workbuddy_mentor_messages[\s\S]*?TO\s+service_role\s*;/i,
+    );
+    const transactionCommit = ackFetchGuardMigration.search(/COMMIT\s*;\s*$/i);
 
-    expect(tableLock).toBeGreaterThanOrEqual(0);
+    expect(transactionBegin).toBeGreaterThanOrEqual(0);
+    expect(tableLock).toBeGreaterThan(transactionBegin);
     expect(legacyRepair).toBeGreaterThan(tableLock);
     expect(constraint).toBeGreaterThan(legacyRepair);
+    expect(serviceRoleGrant).toBeGreaterThan(constraint);
+    expect(transactionCommit).toBeGreaterThan(serviceRoleGrant);
     expect(ackFetchGuardMigration).toMatch(
       /ADD\s+CONSTRAINT\s+mentor_message_deliveries_ack_requires_fetch_check[\s\S]*?acknowledged_at\s+IS\s+NULL[\s\S]*?first_fetched_at\s+IS\s+NOT\s+NULL/i,
     );

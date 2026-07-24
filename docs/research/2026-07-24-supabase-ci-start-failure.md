@@ -11,7 +11,15 @@
 - 失败 attempt 1 与成功基线使用同一 Ubuntu runner image；`supabase/setup-cli` action commit 也相同。失败 attempt 2 才切换到更新的 runner image，因此 runner image 变更不能单独解释两次失败。
 - 两个提交之间没有改 `supabase/config.toml` 或原 `supabase start` 命令。当前稳定版仍是 [Supabase CLI v2.109.1](https://github.com/supabase/cli/releases/tag/v2.109.1)。
 
-历史 workflow 使用 `>/dev/null 2>&1` 丢弃了 CLI 在失败时产生的全部证据。因此，无法从现有 run 可靠地区分镜像仓库网络错误、runner 资源抖动或某个容器健康检查超时。把其中任何一个写成已确认根因都属于推测。
+历史 workflow 使用 `>/dev/null 2>&1` 丢弃了 CLI 在失败时产生的全部证据。因此，仅凭 run 30061128457 无法可靠地区分镜像仓库网络错误、runner 资源抖动、容器健康检查或 migration 错误。
+
+加入安全诊断后的 [run 30062353821](https://github.com/SuperOPC-AI-Incubator/workbuddy-copilot/actions/runs/30062353821) 给出了精确根因：
+
+```text
+ERROR: LOCK TABLE can only be used in transaction blocks (SQLSTATE 25P01)
+```
+
+失败发生在 `supabase start` 自动应用 `20260724010000_require_fetch_before_ack.sql` 时。该 migration 直接执行 `LOCK TABLE`，但文件自身没有 `BEGIN`/`COMMIT`；Supabase CLI migration runner 也没有为整份文件隐式提供事务块。PostgreSQL 官方文档明确说明，`LOCK TABLE` 在事务块之外会报错，并要求用 `BEGIN` 与 `COMMIT`/`ROLLBACK` 定义事务块：[PostgreSQL LOCK](https://www.postgresql.org/docs/current/sql-lock.html)。
 
 ## 官方实现证据
 
@@ -30,3 +38,14 @@ Supabase CLI v2.109.1 的源码显示：
 3. 只对明确的 registry 限流、网络错误或容器健康超时清理后重试一次。
 4. 单次 start 限时 8 分钟、cleanup 限时 2 分钟；超时进程先 TERM，5 秒后仍未关闭则 KILL。
 5. 配置错误、镜像不存在、命令超时以及第二次失败保持非零退出，后续数据库和浏览器测试不会被伪造为通过。
+
+## Migration 修复
+
+ACK forward migration 现在显式以 `BEGIN` 开始、以文件末尾的 `COMMIT` 结束。`ACCESS EXCLUSIVE` 锁继续覆盖以下完整原子区间：
+
+1. 重排历史 acknowledged-without-fetch 行；
+2. 添加并验证 fetch-before-ack CHECK；
+3. 替换 ACK RPC；
+4. 恢复 service-role-only 权限。
+
+防回归测试锁定 `BEGIN < LOCK < repair < constraint < RPC grant < COMMIT` 的顺序。真实 Supabase CLI 2.109.1 migration runner 已从空数据库成功应用全部 migrations；`supabase db reset` 和 135 个 pgTAP 均通过。Forward-upgrade runner 每次先在 migration transaction 内注入一个确定性 SQL 错误，验证失败后的独立 cleanup 能恢复 validated CHECK 和测试数据，再运行真实 migration 的 7 项语义断言。

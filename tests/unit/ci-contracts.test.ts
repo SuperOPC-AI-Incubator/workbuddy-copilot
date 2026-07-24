@@ -49,6 +49,7 @@ describe("cloud-loop CI contracts", () => {
     const integration = await read("scripts/ci/run-required-vitest.mjs");
     const e2e = await read("scripts/ci/run-required-playwright.mjs");
     const negativeControl = await read("scripts/ci/run-e2e-negative-controls.mjs");
+    const upgrade = await read("scripts/ci/run-ack-fetch-upgrade-test.mjs");
     const playwrightConfig = await read("playwright.config.ts");
     const manifest = await read("scripts/ci/playwright-manifest.mjs");
     const reportContract = await read("scripts/ci/playwright-report-contract.mjs");
@@ -80,6 +81,11 @@ describe("cloud-loop CI contracts", () => {
     );
     expect(playwrightConfig).toMatch(/process\.env\.CI/);
     expect(playwrightConfig).toMatch(/trace:\s*retainBrowserArtifacts[^]*:\s*"off"/);
+    expect(upgrade).toContain("__ack_fetch_negative_control_missing");
+    expect(upgrade).toMatch(/finally[\s\S]*cleanup/i);
+    expect(upgrade).toMatch(
+      /mentor_message_deliveries_ack_requires_fetch_check[\s\S]*convalidated/i,
+    );
   });
 
   test("predeploy is an explicit test-project opt-in, never an implicit production pass", async () => {

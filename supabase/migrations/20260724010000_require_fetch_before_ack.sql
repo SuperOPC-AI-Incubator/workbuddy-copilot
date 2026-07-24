@@ -1,3 +1,5 @@
+BEGIN;
+
 -- Prevent the legacy ACK function from racing the one-time repair. A call
 -- already waiting on this table resumes under the CHECK constraint below.
 LOCK TABLE public.mentor_message_deliveries IN ACCESS EXCLUSIVE MODE;
@@ -103,3 +105,5 @@ REVOKE ALL ON FUNCTION public.ack_workbuddy_mentor_messages(uuid, uuid[])
   FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.ack_workbuddy_mentor_messages(uuid, uuid[])
   TO service_role;
+
+COMMIT;
