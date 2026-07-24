@@ -24,6 +24,7 @@
     "test:connectors:windows": "pwsh -NoLogo -NoProfile -File tests/connectors/test-windows.ps1",
     "test:ops": "bash tests/ops/deployment-assets.test.sh",
     "ci:forbidden-hosts": "node scripts/ci/check-forbidden-hosts.mjs",
+    "supabase:auth:plan": "node scripts/configure-supabase-auth.mjs",
     "start": "node .output/server/index.mjs",
     "check": "bun run format:check && bun run lint -- --max-warnings=0 && bun run typecheck && bun run test && bun run build"
   },

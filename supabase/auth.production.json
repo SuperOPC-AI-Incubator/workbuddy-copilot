@@ -1,0 +1,10 @@
+{
+  "projectRef": "hwxbrkvvziqpvsmyllqn",
+  "siteUrl": "https://copilot.sg.superbrain-ai.com",
+  "additionalRedirectUrls": ["https://copilot.sg.superbrain-ai.com/"],
+  "enableSignup": true,
+  "email": {
+    "enableSignup": true,
+    "enableConfirmations": false
+  }
+}

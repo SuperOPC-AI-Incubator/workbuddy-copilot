@@ -27,6 +27,10 @@ test-results/
 playwright-report/
 blob-report/
 
+# Supabase CLI generated link and branch state
+supabase/.temp/
+supabase/.branches/
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars

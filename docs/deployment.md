@@ -42,6 +42,43 @@ buffering so MCP and server-sent event streams are not delayed.
 Both the tracked `.env` and `.env.example` are deliberately empty-value
 templates. They are not deployment configuration and must remain secret-free.
 
+## Managed Supabase Auth configuration
+
+The tracked Supabase project is `hwxbrkvvziqpvsmyllqn`. Production Auth intent
+is stored in `supabase/auth.production.json`; it contains only public URLs and
+booleans. Do not add an access token, database password, service-role key, or
+publishable key to that file.
+
+Do not use `supabase config push` for the production Auth setup. The current CLI
+has no Auth dry-run and builds a broader Auth update body than the five fields
+reviewed for this prototype. Use the scoped Management API helper instead:
+
+```bash
+bun run supabase:auth:plan
+node scripts/configure-supabase-auth.mjs \
+  --apply \
+  --project-ref hwxbrkvvziqpvsmyllqn
+```
+
+The plan is the default and performs only a remote read. Apply fails before
+network access unless the explicit ref matches both
+`supabase/config.toml` and `supabase/auth.production.json`; it PATCHes only the
+reviewed URL/signup/email-confirmation fields and then reads them back for exact
+verification. The helper never prints the access token or a raw remote response.
+
+After an interactive `supabase login` on macOS, the CLI stores the default
+profile token in Keychain. The helper reads that item directly with
+`/usr/bin/security` and no shell, so the resolved value is not placed in a
+command argument, environment variable, log, or file. macOS may ask the signed-in
+user to approve Keychain access once. In CI and on non-macOS hosts, inject
+`SUPABASE_ACCESS_TOKEN` through the platform secret store; never put its resolved
+value in shell history or a tracked environment file.
+
+The prototype keeps public Email signup enabled and Email confirmation disabled
+so a student receives a session immediately. This does not open public mentor
+registration: the public UI submits only student metadata, the database
+provisions the student role, and mentors remain an admin-created account type.
+
 Create `/etc/superbrain-copilot.env` directly on the server, owned by
 `root:deploy` with mode `0640`. Populate the variables listed in
 `.env.example`; do not copy the file back into Git or a release. The systemd
