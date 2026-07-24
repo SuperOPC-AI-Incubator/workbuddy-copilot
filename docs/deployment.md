@@ -185,8 +185,11 @@ scripts/healthcheck.sh https://copilot.sg.superbrain-ai.com
 ```
 
 It requires exact status codes for process health (200), dependency readiness
-(200), MCP metadata and tool listing (200), and unauthenticated WorkBuddy
-ingest rejection (401).
+(200), public MCP metadata (200), the OAuth-protected MCP tool listing (401
+without credentials), and unauthenticated WorkBuddy ingest rejection (401).
+The MCP 401 is accepted only when its `WWW-Authenticate` Bearer challenge points
+back to this deployment's protected-resource metadata URL; an unauthenticated
+200 tool listing is treated as an authentication regression.
 
 ## Automatic and manual rollback
 

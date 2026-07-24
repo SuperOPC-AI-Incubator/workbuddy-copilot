@@ -124,6 +124,7 @@ EOF
 set -euo pipefail
 
 output_file=""
+header_file=""
 write_format=""
 method="GET"
 url=""
@@ -136,6 +137,10 @@ while (($#)); do
       ;;
     -w|--write-out)
       write_format="$2"
+      shift 2
+      ;;
+    -D|--dump-header)
+      header_file="$2"
       shift 2
       ;;
     -X|--request)
@@ -163,6 +168,7 @@ done
 
 status="500"
 body='{"error":"unexpected fake URL"}'
+www_authenticate=""
 case "$url" in
   */api/health)
     status="${FAKE_HEALTH_STATUS:-200}"
@@ -194,8 +200,14 @@ case "$url" in
     body='{"resource":"https://example.test/mcp"}'
     ;;
   */.mcp/list-tools)
-    status="${FAKE_MCP_TOOLS_STATUS:-200}"
-    body='{"tools":[]}'
+    status="${FAKE_MCP_TOOLS_STATUS:-401}"
+    body='{"error":"unauthorized"}'
+    if [[ "${FAKE_MCP_TOOLS_WWW_AUTHENTICATE+is_set}" == "is_set" ]]; then
+      www_authenticate="$FAKE_MCP_TOOLS_WWW_AUTHENTICATE"
+    else
+      mcp_origin="${url%/.mcp/list-tools}"
+      www_authenticate="Bearer realm=\"mcp\", resource_metadata=\"$mcp_origin/.well-known/oauth-protected-resource\""
+    fi
     ;;
   */api/public/workbuddy/ingest)
     status="${FAKE_INGEST_STATUS:-401}"
@@ -204,6 +216,15 @@ case "$url" in
 esac
 
 printf 'curl|%s|%s\n' "$method" "$url" >>"$OPS_LOG"
+if [[ -n "$header_file" ]]; then
+  {
+    printf 'HTTP/2 %s\r\n' "$status"
+    if [[ -n "$www_authenticate" ]]; then
+      printf 'WWW-Authenticate: %s\r\n' "$www_authenticate"
+    fi
+    printf '\r\n'
+  } >"$header_file"
+fi
 if [[ -n "$output_file" ]]; then
   printf '%s' "$body" >"$output_file"
 else
@@ -803,11 +824,15 @@ test_healthcheck_exact_status_contract() {
   PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" \
     "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"
 
+  PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" \
+    "$HEALTHCHECK_SCRIPT" "http://127.0.0.1:3410"
+
   assert_contains "$ops_log" "curl|GET|https://copilot.example.test/api/health"
   assert_contains "$ops_log" "curl|GET|https://copilot.example.test/api/ready"
   assert_contains "$ops_log" \
     "curl|GET|https://copilot.example.test/.well-known/oauth-protected-resource"
   assert_contains "$ops_log" "curl|GET|https://copilot.example.test/.mcp/list-tools"
+  assert_contains "$ops_log" "curl|GET|http://127.0.0.1:3410/.mcp/list-tools"
   assert_contains "$ops_log" \
     "curl|POST|https://copilot.example.test/api/public/workbuddy/ingest"
 
@@ -819,6 +844,35 @@ test_healthcheck_exact_status_contract() {
   if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" FAKE_HEALTH_STATUS=204 \
     "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"; then
     fail "healthcheck accepted health status 204 instead of exactly 200"
+  fi
+
+  if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" FAKE_MCP_TOOLS_STATUS=200 \
+    "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"; then
+    fail "healthcheck accepted an unauthenticated MCP tool listing"
+  fi
+
+  if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" \
+    FAKE_MCP_TOOLS_WWW_AUTHENTICATE="" \
+    "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"; then
+    fail "healthcheck accepted an MCP 401 without a WWW-Authenticate challenge"
+  fi
+
+  if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" \
+    FAKE_MCP_TOOLS_WWW_AUTHENTICATE='Basic realm="mcp", resource_metadata="https://copilot.example.test/.well-known/oauth-protected-resource"' \
+    "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"; then
+    fail "healthcheck accepted a non-Bearer MCP authentication challenge"
+  fi
+
+  if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" \
+    FAKE_MCP_TOOLS_WWW_AUTHENTICATE='Bearer realm="mcp", resource_metadata="https://other.example.test/.well-known/oauth-protected-resource"' \
+    "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"; then
+    fail "healthcheck accepted an MCP challenge for another resource server"
+  fi
+
+  if PATH="$fake_bin:$PATH" OPS_LOG="$ops_log" \
+    FAKE_MCP_TOOLS_WWW_AUTHENTICATE='Bearer fake_resource_metadata="https://copilot.example.test/.well-known/oauth-protected-resource"' \
+    "$HEALTHCHECK_SCRIPT" "https://copilot.example.test"; then
+    fail "healthcheck accepted a lookalike OAuth metadata parameter"
   fi
 }
 
