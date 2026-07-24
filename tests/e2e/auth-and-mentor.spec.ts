@@ -106,6 +106,11 @@ test.describe("authentication and mentor administration", () => {
           mustChangePassword: false,
           teamAdmin: true,
         });
+        await harness.createStaff({
+          prefix: "existing",
+          mustChangePassword: false,
+          teamAdmin: false,
+        });
         const student = await harness.createStudent("停用权限学员");
         const seeded = await harness.createStudentSession(student, {
           title: harness.uniqueLabel("停用权限会话"),
@@ -123,7 +128,7 @@ test.describe("authentication and mentor administration", () => {
       await expect(page.getByRole("heading", { name: "导师账号", exact: true })).toBeVisible();
 
       await page.getByLabel("用户名").fill(managedUsername);
-      await page.getByLabel("临时密码").fill(harness.initialPassword);
+      await page.getByLabel("临时密码", { exact: true }).fill(harness.initialPassword);
       await page.getByRole("button", { name: "创建账号" }).click();
       await expect(page.getByRole("status")).toHaveText(
         "导师账号已创建。临时密码不会在此页面再次显示。",
