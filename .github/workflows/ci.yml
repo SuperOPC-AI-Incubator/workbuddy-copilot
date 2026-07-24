@@ -67,9 +67,9 @@ jobs:
         run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: "2.109.1"
       - name: Start disposable local Supabase
-        run: supabase start >/dev/null 2>&1
+        run: node scripts/ci/start-local-supabase.mjs
       - name: Reapply every migration from an empty database
         run: supabase db reset
       - name: Export local keys directly to the job environment

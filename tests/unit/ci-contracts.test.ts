@@ -12,7 +12,9 @@ describe("cloud-loop CI contracts", () => {
 
     expect(workflow).toMatch(/permissions:\s*\n\s+contents:\s+read/);
     expect(workflow).toMatch(/bun install --frozen-lockfile/);
-    expect(workflow).toMatch(/supabase start/);
+    expect(workflow).toMatch(/version:\s*"2\.109\.1"/);
+    expect(workflow).toContain("node scripts/ci/start-local-supabase.mjs");
+    expect(workflow).not.toMatch(/supabase start\s*>\/dev\/null\s+2>&1/);
     expect(workflow).toMatch(/supabase db reset/);
     expect(workflow).toMatch(/supabase test db/);
     expect(workflow).toMatch(/test:integration:required/);
