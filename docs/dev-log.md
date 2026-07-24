@@ -32,3 +32,14 @@
 - 应用全量：`bun run check` PASS；39 个测试文件通过、1 个跳过，380 个测试通过、6 个既有跳过；生产构建通过。
 - 完整本地服务栈未能启动：Colima 在创建 vector 容器时无法挂载其 Docker socket（`operation not supported`），因此并发/API/E2E 按“环境允许”规则未执行；未通过排除服务或放宽判据制造通过。
 - 最终独立复审：No findings；migration 事务边界和 fixture failure self-heal 的 Important 均已关闭。
+
+## 2026-07-24 — Connector ACK 并发测试去墙钟竞速
+
+- 真实 runner RED：[CI run 30063520488 attempt 1](https://github.com/SuperOPC-AI-Incubator/workbuddy-copilot/actions/runs/30063520488/attempts/1) 的 Quality job 在 `workbuddy-connector.test.ts:728` 将 `blocked` 误判为持锁；同一 SHA 的 Ubuntu/macOS/Windows connector jobs 均通过，独立 Supabase job 的 reset、pgTAP、upgrade、concurrency 和 browser loop 也全部通过。
+- 本地复现：connector 单测连续 30 轮和普通全量连续 12 轮均通过；8 份全量并发时 8/8 复现同一 `expected resolved, received blocked`。失败断言前 `.ack.lock` 与 `.ledger.lock` 的 lease 数始终为 `[0, 0]`，证明 ACK 网络期间未持本地锁。
+- 根因：测试用 `Promise.race` 要求受控 concurrent fetch 在 100ms 内完成，把 runner 负载和临时文件系统调度时间错误地当成锁状态；同一 SHA 未改代码重跑的 [attempt 2](https://github.com/SuperOPC-AI-Incubator/workbuddy-copilot/actions/runs/30063520488/attempts/2) 全绿，进一步确认时序抖动。
+- 最小修复：删除 100ms 墙钟分支；在测试已注入立即返回的 fetch 和零等待锁重试条件下，直接等待 concurrent fetch 在 ACK gate 释放前完成，再验证 ACK 与 fetch 合并后的 ledger。
+- 防假绿负控：临时让 ACK 请求持有 ledger lock，新测试稳定 RED，捕获 lease `[0, 1]`；负控代码随后恢复。
+- 定向 GREEN：`bun run test:connectors`，2 个文件、32 项通过；修复后的目标用例 8 份并发压力运行 8/8 通过。
+- 最终全量：`bun run check` PASS；格式、lint、TypeScript、39 个测试文件（380 项通过、6 项既有跳过）和生产构建全部通过。
+- 最终独立复审：No findings；确认 gate 顺序确定性覆盖无跨网络持锁及 latest-ledger merge，真实持锁回归会超时判红。

@@ -710,13 +710,10 @@ describe("WorkBuddy connector mentor delivery", () => {
       }),
     );
     const concurrentFetch = connector.fetchMessages({});
-    const concurrentOutcome = await Promise.race([
-      concurrentFetch.then(
-        () => "resolved",
-        () => "rejected",
-      ),
-      new Promise<string>((resolveTimeout) => setTimeout(() => resolveTimeout("blocked"), 100)),
-    ]);
+    const concurrentOutcome = await concurrentFetch.then(
+      () => "resolved",
+      () => "rejected",
+    );
     releaseAck();
 
     const ackResult = await pendingAck;
