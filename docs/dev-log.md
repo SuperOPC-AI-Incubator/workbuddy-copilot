@@ -43,3 +43,29 @@
 - 定向 GREEN：`bun run test:connectors`，2 个文件、32 项通过；修复后的目标用例 8 份并发压力运行 8/8 通过。
 - 最终全量：`bun run check` PASS；格式、lint、TypeScript、39 个测试文件（380 项通过、6 项既有跳过）和生产构建全部通过。
 - 最终独立复审：No findings；确认 gate 顺序确定性覆盖无跨网络持锁及 latest-ledger merge，真实持锁回归会超时判红。
+
+## 2026-07-24 — AI 供应商可配置与腾讯 TokenHub 上线准备
+
+### 测试方案
+
+| 场景                  | 输入                                                                 | 判定                                                                                  | 类型                |
+| --------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------- |
+| Generic provider 可用 | generic key/URL/model 完整，不设旧 DeepSeek credential               | AI 环境入口可用并只使用 generic 三件套                                                | unit/config         |
+| 腾讯兼容请求          | 自定义 HTTPS chat-completions URL、model、`enable_thinking=false`    | fetch 使用指定 URL/model，JSON 明确含 `enable_thinking: false`                        | unit/request        |
+| 旧配置兼容            | 仅 `DEEPSEEK_API_KEY`                                                | 仍请求 DeepSeek 固定 HTTPS endpoint 和 `deepseek-chat`                                | unit/request        |
+| 缺失与非法配置        | 无 credential；generic 三件套部分缺失；HTTP/userinfo URL；非法布尔值 | 无配置返回 unavailable；任何 partial/非法 generic 配置在请求前安全失败且不回退 legacy | unit/config         |
+| Provider 故障脱敏     | 恶意 response body、自定义 URL 和 credential                         | 返回固定 `AI_PROVIDER_UNAVAILABLE`，异常与日志不含 URL/key/body                       | unit/safety         |
+| 构建隔离              | deploy 进程及 env 文件带全部 AI runtime config                       | install/check/build 均看不到新旧 AI runtime config                                    | ops/deploy contract |
+| 回归                  | 完整仓库                                                             | `bun run check` 全绿                                                                  | full                |
+
+- 测试工具：Vitest；Bash 部署契约；Prettier/ESLint/TypeScript/Vite production build。
+- RED 要求：现有固定 DeepSeek 实现必须使 generic/configurable request 用例失败；部署构建清理用例必须显示新变量仍进入子进程。
+- 防假绿：把实现重新写死为 DeepSeek URL/model 时，自定义 URL/model/`enable_thinking` 用例必须失败；安全用例直接检查 fetch 参数、异常序列化与日志调用中均无 secret。
+- RED：`bunx vitest run tests/unit/ai-provider-config.test.ts tests/unit/ai-safety.test.ts` 在固定 DeepSeek 实现上 6 项失败，明确捕获 generic credential 不可用、自定义 URL/model 未使用、非法配置未拒绝和 generic 故障未进入安全错误路径；`bash tests/ops/deployment-assets.test.sh` 因 `.env.example` 缺新变量失败。该 RED 同时证明重新写死 DeepSeek 时 endpoint/model/thinking 契约会变红。
+- 最小实现：generic key/URL/model 原子成组且优先；任一 partial generic 配置（即使存在 legacy key）在 fetch 前以固定 `AIProviderError` 失败；仅 legacy key 时保持 DeepSeek endpoint/model/请求体；URL 限 HTTPS 且无 userinfo；thinking 仅接受 `true|false` 并作为顶层布尔发送。不增加 SDK、fallback 或供应商路由。
+- 定向 GREEN：AI config/request/safety 与既有 domain tests 共 18 项通过；TypeScript 通过；部署资产契约通过，并证明 install/check/build 均看不到新旧 AI runtime config。
+- 首轮全量在 `format:check` 正确变红，定位到 4 个本轮新增/修改文件；仅运行项目 formatter 后重跑，未修改测试判据或业务语义。
+- 首轮全量：`bun run check` PASS；格式、lint、TypeScript、40 个测试文件（392 项通过、6 项既有跳过）和生产构建全部通过。
+- 独立 review 首轮发现 2 个 Important：whitespace-only generic 值可能被当作未配置并回退 legacy；fetch 默认跟随重定向可绕过初始 URL 边界。新增两个负控后均先见 RED（2 项失败），再改为以 raw 非空信号判定“配置过”并设置 `redirect: "error"`；定向 17 项与 TypeScript 随后通过。
+- Review 修复后全量：`bun run check` PASS；格式、lint、TypeScript、40 个测试文件（395 项通过、6 项既有跳过）和生产构建全部通过。
+- 最终独立复审：No findings；两项原 Important 均已关闭，新增负控能在旧实现下稳定变红。

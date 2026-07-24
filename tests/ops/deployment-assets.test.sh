@@ -47,14 +47,18 @@ make_fake_toolchain() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'bun|%s|%s\n' "$PWD" "$*" >>"$OPS_LOG"
-printf 'bun-env|%s|VITE_URL=%s|VITE_KEY=%s|VITE_PROJECT=%s|SERVICE_ROLE=%s|INGEST=%s|DEEPSEEK=%s\n' \
+printf 'bun-env|%s|VITE_URL=%s|VITE_KEY=%s|VITE_PROJECT=%s|SERVICE_ROLE=%s|INGEST=%s|DEEPSEEK=%s|AI_KEY=%s|AI_URL=%s|AI_MODEL=%s|AI_THINKING=%s\n' \
   "$*" \
   "${VITE_SUPABASE_URL-UNSET}" \
   "${VITE_SUPABASE_PUBLISHABLE_KEY-UNSET}" \
   "${VITE_SUPABASE_PROJECT_ID-UNSET}" \
   "${SUPABASE_SERVICE_ROLE_KEY-UNSET}" \
   "${WORKBUDDY_INGEST_SECRET-UNSET}" \
-  "${DEEPSEEK_API_KEY-UNSET}" >>"$OPS_LOG"
+  "${DEEPSEEK_API_KEY-UNSET}" \
+  "${AI_PROVIDER_API_KEY-UNSET}" \
+  "${AI_PROVIDER_URL-UNSET}" \
+  "${AI_PROVIDER_MODEL-UNSET}" \
+  "${AI_PROVIDER_ENABLE_THINKING-UNSET}" >>"$OPS_LOG"
 if [[ "$*" == "run build" ]]; then
   mkdir -p .output/server
   printf 'export default {};\n' >.output/server/index.mjs
@@ -295,6 +299,10 @@ VITE_SUPABASE_PUBLISHABLE_KEY=public-browser-key-value
 VITE_SUPABASE_PROJECT_ID=test-project
 WORKBUDDY_INGEST_SECRET=ingest-must-not-reach-build
 DEEPSEEK_API_KEY=deepseek-must-not-reach-build
+AI_PROVIDER_API_KEY=provider-key-must-not-reach-build
+AI_PROVIDER_URL=https://provider.example.test/v1/chat/completions
+AI_PROVIDER_MODEL=provider-model-must-not-reach-build
+AI_PROVIDER_ENABLE_THINKING=false
 DOMAIN_PACK=prototype
 PORT=3410
 EOF
@@ -358,7 +366,7 @@ test_static_contracts() {
   assert_not_contains "$DEPLOY_SCRIPT" "workbuddy-copilot.service"
 
   local expected_env
-  expected_env=$'SUPABASE_URL=\nSUPABASE_PUBLISHABLE_KEY=\nSUPABASE_SERVICE_ROLE_KEY=\nVITE_SUPABASE_URL=\nVITE_SUPABASE_PUBLISHABLE_KEY=\nVITE_SUPABASE_PROJECT_ID=\nWORKBUDDY_INGEST_SECRET=\nDEEPSEEK_API_KEY=\nDOMAIN_PACK=\nPORT='
+  expected_env=$'SUPABASE_URL=\nSUPABASE_PUBLISHABLE_KEY=\nSUPABASE_SERVICE_ROLE_KEY=\nVITE_SUPABASE_URL=\nVITE_SUPABASE_PUBLISHABLE_KEY=\nVITE_SUPABASE_PROJECT_ID=\nWORKBUDDY_INGEST_SECRET=\nDEEPSEEK_API_KEY=\nAI_PROVIDER_API_KEY=\nAI_PROVIDER_URL=\nAI_PROVIDER_MODEL=\nAI_PROVIDER_ENABLE_THINKING=\nDOMAIN_PACK=\nPORT='
   assert_eq "$(cat "$ENV_EXAMPLE")" "$expected_env" ".env.example"
 
   assert_contains "$PROJECT_ROOT/.gitignore" ".env"
@@ -704,14 +712,18 @@ test_build_receives_only_validated_public_supabase_config() {
     SUPABASE_SERVICE_ROLE_KEY=ambient-service-role \
     WORKBUDDY_INGEST_SECRET=ambient-ingest \
     DEEPSEEK_API_KEY=ambient-deepseek \
+    AI_PROVIDER_API_KEY=ambient-provider-key \
+    AI_PROVIDER_URL=https://ambient-provider.example.test/v1/chat/completions \
+    AI_PROVIDER_MODEL=ambient-provider-model \
+    AI_PROVIDER_ENABLE_THINKING=true \
     "$DEPLOY_SCRIPT" "$new_release"
 
   assert_contains "$ops_log" \
-    "bun-env|install --frozen-lockfile|VITE_URL=UNSET|VITE_KEY=UNSET|VITE_PROJECT=UNSET|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET"
+    "bun-env|install --frozen-lockfile|VITE_URL=UNSET|VITE_KEY=UNSET|VITE_PROJECT=UNSET|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET|AI_KEY=UNSET|AI_URL=UNSET|AI_MODEL=UNSET|AI_THINKING=UNSET"
   assert_contains "$ops_log" \
-    "bun-env|run check|VITE_URL=UNSET|VITE_KEY=UNSET|VITE_PROJECT=UNSET|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET"
+    "bun-env|run check|VITE_URL=UNSET|VITE_KEY=UNSET|VITE_PROJECT=UNSET|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET|AI_KEY=UNSET|AI_URL=UNSET|AI_MODEL=UNSET|AI_THINKING=UNSET"
   assert_contains "$ops_log" \
-    "bun-env|run build|VITE_URL=https://test-project.supabase.co|VITE_KEY=public-browser-key-value|VITE_PROJECT=test-project|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET"
+    "bun-env|run build|VITE_URL=https://test-project.supabase.co|VITE_KEY=public-browser-key-value|VITE_PROJECT=test-project|SERVICE_ROLE=UNSET|INGEST=UNSET|DEEPSEEK=UNSET|AI_KEY=UNSET|AI_URL=UNSET|AI_MODEL=UNSET|AI_THINKING=UNSET"
   [[ ! -e "$executed_marker" ]] ||
     fail "deployment environment file content was executed"
 }

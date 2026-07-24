@@ -220,10 +220,21 @@ than returning or truncating the message.
 context. Unknown values log only a sanitized warning and fall back to the
 general pack.
 
-`DEEPSEEK_API_KEY` is optional for the delivery loop. When it is absent, AI
-draft and answer actions return a clear unavailable result; manual mentor
-send, timeline status, MCP delivery, and the fallback connector continue to
-work.
+AI can use either a complete generic OpenAI-compatible provider configuration
+(`AI_PROVIDER_API_KEY`, `AI_PROVIDER_URL`, and `AI_PROVIDER_MODEL`) or the
+legacy `DEEPSEEK_API_KEY`. The generic group takes precedence and optionally
+accepts `AI_PROVIDER_ENABLE_THINKING=true|false`, which is sent as the top-level
+`enable_thinking` boolean. A partial generic group fails closed before fetch
+and never falls back to the legacy key, preventing a credential from being
+sent to the wrong provider. Generic URLs must use HTTPS and contain no
+userinfo. Provider HTTP redirects are rejected rather than followed, so the
+validated endpoint cannot redirect a server request to a second address.
+
+When no generic group or legacy key is present, AI draft and answer actions
+return a clear unavailable result; manual mentor send, timeline status, MCP
+delivery, and the fallback connector continue to work. Tencent TokenHub is the
+primary runtime profile and DashScope is a manually selected standby; the
+request path does not implement automatic fallback.
 
 Provider failures are normalized to stable internal codes before they reach a
 server-function boundary. Provider response bodies, endpoint details, and keys

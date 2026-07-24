@@ -87,6 +87,32 @@ EnvironmentFile has been read, so blank or conflicting `HOST`/`PORT` entries
 cannot change the listener. Each immutable release also receives a non-secret
 `.release.env` containing only its validated release id.
 
+For the Tencent TokenHub primary provider, configure the complete generic
+provider group at runtime:
+
+```dotenv
+AI_PROVIDER_API_KEY=<injected by the server secret store>
+AI_PROVIDER_URL=https://tokenhub.tencentmaas.com/v1/chat/completions
+AI_PROVIDER_MODEL=qwen3.5-flash
+AI_PROVIDER_ENABLE_THINKING=false
+```
+
+`AI_PROVIDER_API_KEY`, `AI_PROVIDER_URL`, and `AI_PROVIDER_MODEL` are an atomic
+group. If any one is set, all three must be non-empty; partial or invalid
+generic configuration fails before network access even when
+`DEEPSEEK_API_KEY` is present. The URL must use HTTPS and must not contain
+userinfo. `AI_PROVIDER_ENABLE_THINKING` is optional, but when set accepts only
+the literal value `true` or `false`.
+
+To switch manually to the DashScope standby, replace the complete group with
+the approved regional OpenAI-compatible chat-completions URL, credential, and
+model (for example the Beijing shared endpoint
+`https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` with
+`qwen-plus`), restart the service, and run the post-deployment smoke checks.
+There is no automatic provider fallback. A deployment that sets only the
+legacy `DEEPSEEK_API_KEY` keeps the existing DeepSeek endpoint, model, and
+request shape.
+
 ## First-time service setup
 
 ```bash
@@ -158,8 +184,10 @@ shell script. It requires a matching HTTPS `VITE_SUPABASE_URL`,
 `VITE_SUPABASE_PUBLISHABLE_KEY`, and `VITE_SUPABASE_PROJECT_ID`. Only those
 three public values are passed to the final browser build. Install, checks, and
 the final build do not receive `SUPABASE_SERVICE_ROLE_KEY`,
-`WORKBUDDY_INGEST_SECRET`, or `DEEPSEEK_API_KEY`; those remain runtime-only
-systemd environment values.
+`WORKBUDDY_INGEST_SECRET`, `DEEPSEEK_API_KEY`, `AI_PROVIDER_API_KEY`,
+`AI_PROVIDER_URL`, `AI_PROVIDER_MODEL`, or
+`AI_PROVIDER_ENABLE_THINKING`; those remain runtime-only systemd environment
+values.
 
 ### Trust boundary and path identity
 

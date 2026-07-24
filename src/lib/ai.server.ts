@@ -4,7 +4,7 @@ import type { Database } from "@/integrations/supabase/types";
 import { resolveDomainPack } from "@/lib/domain-packs";
 
 const DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions";
-const MODEL = "deepseek-chat";
+const DEEPSEEK_MODEL = "deepseek-chat";
 export const AI_PROVIDER_TIMEOUT_MS = 20_000;
 
 type ChatMsg = { role: "system" | "user" | "assistant"; content: string };
@@ -61,7 +61,7 @@ export function aiUnavailableResult(mode: "draft" | "student") {
 }
 
 export function isAIAvailableFromEnvironment(): boolean {
-  return Boolean(process.env.DEEPSEEK_API_KEY);
+  return providerConfigFromEnvironment() !== null;
 }
 
 export class AIProviderError extends Error {
@@ -79,11 +79,76 @@ export type AIProviderRuntime = {
   clear?: (timer: unknown) => void;
 };
 
-async function callDeepseek(
+type AIProviderConfig = {
+  apiKey: string;
+  url: string;
+  model: string;
+  enableThinking?: boolean;
+};
+
+function providerConfigFromEnvironment(): AIProviderConfig | null {
+  const rawGenericApiKey = process.env.AI_PROVIDER_API_KEY;
+  const rawGenericUrl = process.env.AI_PROVIDER_URL;
+  const rawGenericModel = process.env.AI_PROVIDER_MODEL;
+  const genericApiKey = rawGenericApiKey?.trim() || "";
+  const genericUrl = rawGenericUrl?.trim() || "";
+  const genericModel = rawGenericModel?.trim() || "";
+  const thinking = process.env.AI_PROVIDER_ENABLE_THINKING;
+  const genericConfigured = Boolean(
+    (rawGenericApiKey !== undefined && rawGenericApiKey !== "") ||
+    (rawGenericUrl !== undefined && rawGenericUrl !== "") ||
+    (rawGenericModel !== undefined && rawGenericModel !== "") ||
+    (thinking !== undefined && thinking !== ""),
+  );
+  if (!genericConfigured) {
+    const legacyApiKey = process.env.DEEPSEEK_API_KEY?.trim() || "";
+    return legacyApiKey
+      ? {
+          apiKey: legacyApiKey,
+          url: DEEPSEEK_URL,
+          model: DEEPSEEK_MODEL,
+        }
+      : null;
+  }
+  if (!genericApiKey || !genericUrl || !genericModel) {
+    throw new AIProviderError();
+  }
+
+  let url: URL;
+  try {
+    url = new URL(genericUrl);
+  } catch {
+    throw new AIProviderError();
+  }
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new AIProviderError();
+  }
+
+  if (thinking !== undefined && thinking !== "" && thinking !== "true" && thinking !== "false") {
+    throw new AIProviderError();
+  }
+
+  return {
+    apiKey: genericApiKey,
+    url: url.toString(),
+    model: genericModel,
+    ...(thinking === "true"
+      ? { enableThinking: true }
+      : thinking === "false"
+        ? { enableThinking: false }
+        : {}),
+  };
+}
+
+async function callAIProvider(
   apiKey: string,
   messages: ChatMsg[],
   opts?: { json?: boolean; temperature?: number },
   runtime: AIProviderRuntime = {},
+  provider: Omit<AIProviderConfig, "apiKey"> = {
+    url: DEEPSEEK_URL,
+    model: DEEPSEEK_MODEL,
+  },
 ) {
   const fetchProvider = runtime.fetch ?? fetch;
   const schedule = runtime.schedule ?? ((callback, delay) => setTimeout(callback, delay));
@@ -91,16 +156,20 @@ async function callDeepseek(
   const controller = new AbortController();
   const timer = schedule(() => controller.abort(), AI_PROVIDER_TIMEOUT_MS);
   try {
-    const res = await fetchProvider(DEEPSEEK_URL, {
+    const res = await fetchProvider(provider.url, {
       method: "POST",
+      redirect: "error",
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: provider.model,
         messages,
         temperature: opts?.temperature ?? 0.5,
+        ...(provider.enableThinking === undefined
+          ? {}
+          : { enable_thinking: provider.enableThinking }),
         ...(opts?.json ? { response_format: { type: "json_object" } } : {}),
       }),
       signal: controller.signal,
@@ -142,6 +211,7 @@ export async function answerStudentPrompt(
   prompt: string,
   apiKey: string,
   providerRuntime?: AIProviderRuntime,
+  providerConfig?: Omit<AIProviderConfig, "apiKey">,
 ): Promise<StudentAnswer> {
   const domainPack = resolveDomainPack(process.env.DOMAIN_PACK);
   const history = await loadRecentTimeline(supabase, sessionId, 12);
@@ -157,11 +227,12 @@ export async function answerStudentPrompt(
     { role: "user", content: prompt },
   ];
 
-  const raw = await callDeepseek(
+  const raw = await callAIProvider(
     apiKey,
     messages,
     { json: true, temperature: 0.4 },
     providerRuntime,
+    providerConfig,
   );
   type Parsed = { reply?: string; diagnosis?: string; severity?: string; tag?: string };
   let parsed: Parsed = {};
@@ -203,6 +274,7 @@ export async function createMentorDraft(
   sessionId: string,
   apiKey: string,
   providerRuntime?: AIProviderRuntime,
+  providerConfig?: Omit<AIProviderConfig, "apiKey">,
 ): Promise<string> {
   const domainPack = resolveDomainPack(process.env.DOMAIN_PACK);
   const history = await loadRecentTimeline(supabase, sessionId, 16);
@@ -222,7 +294,7 @@ export async function createMentorDraft(
     })
     .join("\n");
 
-  return callDeepseek(
+  return callAIProvider(
     apiKey,
     [
       {
@@ -233,6 +305,7 @@ export async function createMentorDraft(
     ],
     { temperature: 0.6 },
     providerRuntime,
+    providerConfig,
   );
 }
 
@@ -241,19 +314,28 @@ export async function answerStudentPromptFromEnvironment(
   sessionId: string,
   prompt: string,
 ) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) return aiUnavailableResult("student");
+  const provider = providerConfigFromEnvironment();
+  if (!provider) return aiUnavailableResult("student");
+  const { apiKey, ...providerConfig } = provider;
   return {
     available: true as const,
-    answer: await answerStudentPrompt(supabase, sessionId, prompt, apiKey),
+    answer: await answerStudentPrompt(
+      supabase,
+      sessionId,
+      prompt,
+      apiKey,
+      undefined,
+      providerConfig,
+    ),
   };
 }
 
 export async function createMentorDraftFromEnvironment(supabase: SB, sessionId: string) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) return aiUnavailableResult("draft");
+  const provider = providerConfigFromEnvironment();
+  if (!provider) return aiUnavailableResult("draft");
+  const { apiKey, ...providerConfig } = provider;
   return {
     available: true as const,
-    draft: await createMentorDraft(supabase, sessionId, apiKey),
+    draft: await createMentorDraft(supabase, sessionId, apiKey, undefined, providerConfig),
   };
 }
