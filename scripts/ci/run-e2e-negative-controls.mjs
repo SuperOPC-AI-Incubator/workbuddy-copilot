@@ -3,7 +3,10 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { runRequiredE2EAfterDeploymentGuard } from "./live-deployment-guard.mjs";
-import { validateNegativeControlReport } from "./playwright-report-contract.mjs";
+import {
+  summarizeNegativeControlFailure,
+  validateNegativeControlReport,
+} from "./playwright-report-contract.mjs";
 
 const required = [
   "E2E_SUPABASE_URL",
@@ -38,6 +41,20 @@ const controls = [
     title:
       "team admin creates and disables a mentor whose existing session then loses read and send",
     marker: "NEGATIVE_CONTROL_DISABLED_SESSION_REACHED",
+    diagnosticStages: [
+      "fixture-setup",
+      "admin-create-mentor",
+      "mentor-context-create",
+      "mentor-password-change",
+      "mentor-read-session",
+      "admin-disable-mentor",
+      "disabled-send-rejected",
+      "target-assertion",
+      "disabled-session-revoked",
+      "mentor-context-close",
+      "disabled-state-persisted",
+      "fixture-cleanup",
+    ],
   },
   {
     mode: "workbuddy-delivery",
@@ -85,6 +102,8 @@ async function expectRed(control) {
   try {
     validateNegativeControlReport(report, control);
   } catch {
+    const diagnostic = summarizeNegativeControlFailure(report, control);
+    process.stderr.write(`E2E negative control diagnostic: ${JSON.stringify(diagnostic)}\n`);
     throw new Error(`E2E negative control failed before its target assertion: ${mode}`);
   }
   process.stdout.write(`E2E negative control produced RED as required: ${mode}.\n`);

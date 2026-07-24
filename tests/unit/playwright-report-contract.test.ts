@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import { REQUIRED_E2E_MANIFEST } from "../../scripts/ci/playwright-manifest.mjs";
 import {
+  summarizeNegativeControlFailure,
   sanitizePlaywrightReport,
   validateNegativeControlReport,
   validateRequiredPlaywrightReport,
@@ -200,6 +201,65 @@ describe("negative-control report contract", () => {
 
     expect(() => validateNegativeControlReport(report, SIGNUP_CONTROL)).toThrow(
       "isolated target failure",
+    );
+  });
+
+  test("summarizes only an allowlisted failing stage and never raw report context", () => {
+    const secret = "password-and-token-from-error-context";
+    const report = negativeControlReport(
+      [`unexpected failure ${secret}`],
+      [{ message: `root error ${secret}` }],
+    );
+    report.suites[0].specs[0].tests[0].results[0].error = {
+      message: `primary error ${secret}`,
+    };
+    report.suites[0].specs[0].tests[0].results[0].stdout = [`stdout ${secret}`];
+    report.suites[0].specs[0].tests[0].results[0].stderr = [`stderr ${secret}`];
+    report.suites[0].specs[0].tests[0].results[0].attachments = [
+      { name: secret, path: `/tmp/${secret}` },
+    ];
+    report.suites[0].specs[0].tests[0].results[0].steps = [
+      {
+        title: `untrusted ${secret}`,
+        error: { message: secret },
+      },
+      {
+        title: "disabled-send-rejected",
+        error: { message: secret },
+      },
+    ];
+    const control = {
+      ...SIGNUP_CONTROL,
+      diagnosticStages: ["fixture-setup", "disabled-send-rejected"],
+    };
+
+    const summary = summarizeNegativeControlFailure(report, control);
+
+    expect(summary).toEqual({
+      title: SIGNUP_CONTROL.title,
+      stage: "disabled-send-rejected",
+      marker: "absent",
+    });
+    expect(JSON.stringify(summary)).not.toContain(secret);
+  });
+
+  test("reports a marked assertion with a secondary error without weakening validation", () => {
+    const report = negativeControlReport([
+      `${SIGNUP_CONTROL.marker}\nassertion failure`,
+      "cleanup failure with a sensitive identifier",
+    ]);
+    const control = {
+      ...SIGNUP_CONTROL,
+      diagnosticStages: ["target-assertion"],
+    };
+
+    expect(summarizeNegativeControlFailure(report, control)).toEqual({
+      title: SIGNUP_CONTROL.title,
+      stage: "target-with-secondary-error",
+      marker: SIGNUP_CONTROL.marker,
+    });
+    expect(() => validateNegativeControlReport(report, control)).toThrow(
+      "exactly one target assertion error",
     );
   });
 });

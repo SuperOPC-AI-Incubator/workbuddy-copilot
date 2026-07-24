@@ -18,7 +18,9 @@ test.describe("authentication and mentor administration", () => {
   });
 
   test.afterEach(async () => {
-    await harness?.cleanup();
+    await test.step("fixture-cleanup", async () => {
+      await harness?.cleanup();
+    });
   });
 
   test("public signup exposes no privileged role choice and provisions only a student", async ({
@@ -97,73 +99,96 @@ test.describe("authentication and mentor administration", () => {
   }) => {
     const negativeControl = process.env.E2E_NEGATIVE_CONTROL === "disabled-session";
     const negativeMarker = negativeControl ? process.env.E2E_NEGATIVE_CONTROL_MARKER : undefined;
-    const admin = await harness.createStaff({
-      prefix: "admin",
-      mustChangePassword: false,
-      teamAdmin: true,
-    });
-    const student = await harness.createStudent("停用权限学员");
-    const seeded = await harness.createStudentSession(student, {
-      title: harness.uniqueLabel("停用权限会话"),
-      prompt: harness.uniqueLabel("停用前可见提示"),
-    });
-    const managedUsername = harness.uniqueUsername("managed");
-    harness.trackMentorUsername(managedUsername);
+    const { admin, student, seeded, managedUsername } =
+      await test.step("fixture-setup", async () => {
+        const admin = await harness.createStaff({
+          prefix: "admin",
+          mustChangePassword: false,
+          teamAdmin: true,
+        });
+        const student = await harness.createStudent("停用权限学员");
+        const seeded = await harness.createStudentSession(student, {
+          title: harness.uniqueLabel("停用权限会话"),
+          prompt: harness.uniqueLabel("停用前可见提示"),
+        });
+        const managedUsername = harness.uniqueUsername("managed");
+        harness.trackMentorUsername(managedUsername);
+        return { admin, student, seeded, managedUsername };
+      });
 
-    await loginWithPassword(page, admin.username, harness.initialPassword);
-    await page.goto("/admin/mentors");
-    await expect(page.getByRole("heading", { name: "导师账号", exact: true })).toBeVisible();
-
-    await page.getByLabel("用户名").fill(managedUsername);
-    await page.getByLabel("临时密码").fill(harness.initialPassword);
-    await page.getByRole("button", { name: "创建账号" }).click();
-    await expect(page.getByRole("status")).toHaveText(
-      "导师账号已创建。临时密码不会在此页面再次显示。",
-    );
-
-    const managed = await harness.trackStaffByUsername(managedUsername);
     const managedCard = page.locator("article").filter({ hasText: managedUsername });
-    await expect(managedCard).toContainText("待首次改密");
+    const managed = await test.step("admin-create-mentor", async () => {
+      await loginWithPassword(page, admin.username, harness.initialPassword);
+      await page.goto("/admin/mentors");
+      await expect(page.getByRole("heading", { name: "导师账号", exact: true })).toBeVisible();
+
+      await page.getByLabel("用户名").fill(managedUsername);
+      await page.getByLabel("临时密码").fill(harness.initialPassword);
+      await page.getByRole("button", { name: "创建账号" }).click();
+      await expect(page.getByRole("status")).toHaveText(
+        "导师账号已创建。临时密码不会在此页面再次显示。",
+      );
+      await expect(managedCard).toContainText("待首次改密");
+      return harness.trackStaffByUsername(managedUsername);
+    });
 
     let mentorContext: BrowserContext | undefined;
     try {
-      mentorContext = await browser.newContext();
-      const mentorPage = await mentorContext.newPage();
-      await loginWithPassword(mentorPage, managedUsername, harness.initialPassword);
-      await mentorPage.getByLabel("新密码", { exact: true }).fill(harness.newPassword);
-      await mentorPage.getByLabel("确认新密码").fill(harness.newPassword);
-      await mentorPage.getByRole("button", { name: "更新密码并继续" }).click();
-      await expect(mentorPage).toHaveURL(/\/$/);
+      const mentorPage = await test.step("mentor-context-create", async () => {
+        mentorContext = await browser.newContext();
+        return mentorContext.newPage();
+      });
+      await test.step("mentor-password-change", async () => {
+        await loginWithPassword(mentorPage, managedUsername, harness.initialPassword);
+        await mentorPage.getByLabel("新密码", { exact: true }).fill(harness.newPassword);
+        await mentorPage.getByLabel("确认新密码").fill(harness.newPassword);
+        await mentorPage.getByRole("button", { name: "更新密码并继续" }).click();
+        await expect(mentorPage).toHaveURL(/\/$/);
+      });
 
-      await mentorPage.getByRole("button", { name: student.displayName }).click();
-      await mentorPage.getByRole("button", { name: new RegExp(seeded.title) }).click();
-      await expect(mentorPage.getByText(seeded.prompt, { exact: true })).toBeVisible();
+      await test.step("mentor-read-session", async () => {
+        await mentorPage.getByRole("button", { name: student.displayName }).click();
+        await mentorPage.getByRole("button", { name: new RegExp(seeded.title) }).click();
+        await expect(mentorPage.getByText(seeded.prompt, { exact: true })).toBeVisible();
+      });
 
-      page.once("dialog", (dialog) => dialog.accept());
-      await managedCard.getByRole("button", { name: "停用账号" }).click();
-      await expect(page.getByRole("status")).toHaveText("账号已停用。");
-      await expect(managedCard).toContainText("已停用");
+      await test.step("admin-disable-mentor", async () => {
+        page.once("dialog", (dialog) => dialog.accept());
+        await managedCard.getByRole("button", { name: "停用账号" }).click();
+        await expect(page.getByRole("status")).toHaveText("账号已停用。");
+        await expect(managedCard).toContainText("已停用");
+      });
 
       const deniedReply = harness.uniqueLabel("停用后不应发送");
-      await mentorPage.getByPlaceholder(/发送导师提示/).fill(deniedReply);
-      await mentorPage.getByRole("button", { name: "发送", exact: true }).click();
-      await expect(mentorPage.getByRole("alert")).toHaveText("导师消息发送失败，请稍后重试。");
-      await expect(
-        harness.timelineContains(seeded.sessionId, deniedReply),
-        negativeMarker,
-      ).resolves.toBe(negativeControl);
+      await test.step("disabled-send-rejected", async () => {
+        await mentorPage.getByPlaceholder(/发送导师提示/).fill(deniedReply);
+        await mentorPage.getByRole("button", { name: "发送", exact: true }).click();
+        await expect(mentorPage.getByRole("alert")).toHaveText("导师消息发送失败，请稍后重试。");
+      });
+      await test.step("target-assertion", async () => {
+        await expect(
+          harness.timelineContains(seeded.sessionId, deniedReply),
+          negativeMarker,
+        ).resolves.toBe(negativeControl);
+      });
 
-      await mentorPage.reload();
-      await expect(mentorPage).toHaveURL(/\/auth(?:\?|$)/);
-      await expect(mentorPage.getByText(seeded.prompt, { exact: true })).toHaveCount(0);
+      await test.step("disabled-session-revoked", async () => {
+        await mentorPage.reload();
+        await expect(mentorPage).toHaveURL(/\/auth(?:\?|$)/);
+        await expect(mentorPage.getByText(seeded.prompt, { exact: true })).toHaveCount(0);
+      });
     } finally {
-      await mentorContext?.close();
+      await test.step("mentor-context-close", async () => {
+        await mentorContext?.close();
+      });
     }
 
-    await expect(harness.readStaffState(managed.userId)).resolves.toMatchObject({
-      active: false,
-      mustChangePassword: false,
-      roles: ["mentor"],
+    await test.step("disabled-state-persisted", async () => {
+      await expect(harness.readStaffState(managed.userId)).resolves.toMatchObject({
+        active: false,
+        mustChangePassword: false,
+        roles: ["mentor"],
+      });
     });
   });
 });

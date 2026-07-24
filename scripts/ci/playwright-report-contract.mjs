@@ -125,6 +125,56 @@ function assertionMarkerLine(error) {
     .trim();
 }
 
+function firstFailedAllowlistedStep(steps, allowedStages) {
+  for (const step of Array.isArray(steps) ? steps : []) {
+    if (step?.error && allowedStages.has(step?.title)) return step.title;
+    const nested = firstFailedAllowlistedStep(step?.steps, allowedStages);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+export function summarizeNegativeControlFailure(report, control) {
+  const specs = collectPlaywrightSpecs(report);
+  const target = specs.find((spec) => spec?.file === control.file && spec?.title === control.title);
+  const tests = Array.isArray(target?.tests) ? target.tests : [];
+  const results = Array.isArray(tests[0]?.results) ? tests[0].results : [];
+  const result = results[0];
+  const resultErrors = Array.isArray(result?.errors)
+    ? result.errors
+    : result?.error
+      ? [result.error]
+      : [];
+  const markerPresent = [result?.error, ...resultErrors].some(
+    (error) => assertionMarkerLine(error) === control.marker,
+  );
+  const infrastructureErrors = Array.isArray(report?.errors) ? report.errors : [];
+  const allowedStages = new Set(
+    Array.isArray(control?.diagnosticStages) ? control.diagnosticStages : [],
+  );
+  const failedStage = firstFailedAllowlistedStep(result?.steps, allowedStages);
+
+  let stage = "unclassified-before-target";
+  if (markerPresent) {
+    stage =
+      resultErrors.length === 1 && infrastructureErrors.length === 0
+        ? "target-assertion"
+        : "target-with-secondary-error";
+  } else if (failedStage) {
+    stage = failedStage;
+  } else if (infrastructureErrors.length > 0) {
+    stage = "root-or-hook";
+  } else if (!target || tests.length !== 1 || results.length !== 1) {
+    stage = "report-envelope";
+  }
+
+  return {
+    title: control.title,
+    stage,
+    marker: markerPresent ? control.marker : "absent",
+  };
+}
+
 export function validateNegativeControlReport(report, control) {
   const specs = collectPlaywrightSpecs(report);
   const infrastructureErrors = Array.isArray(report?.errors) ? report.errors : [];
