@@ -68,4 +68,9 @@
 - 首轮全量：`bun run check` PASS；格式、lint、TypeScript、40 个测试文件（392 项通过、6 项既有跳过）和生产构建全部通过。
 - 独立 review 首轮发现 2 个 Important：whitespace-only generic 值可能被当作未配置并回退 legacy；fetch 默认跟随重定向可绕过初始 URL 边界。新增两个负控后均先见 RED（2 项失败），再改为以 raw 非空信号判定“配置过”并设置 `redirect: "error"`；定向 17 项与 TypeScript 随后通过。
 - Review 修复后全量：`bun run check` PASS；格式、lint、TypeScript、40 个测试文件（395 项通过、6 项既有跳过）和生产构建全部通过。
+- GitHub CI：[run 30078144582](https://github.com/SuperOPC-AI-Incubator/workbuddy-copilot/actions/runs/30078144582) PASS；Quality、Ubuntu/macOS/Windows connector、空库 migrations、135 项 pgTAP、upgrade fixture、真实并发、4 组浏览器 RED control 和 4 条 E2E 全部通过。
+- 生产发布：腾讯 TokenHub credential 通过服务器私有运行配置注入，配置文件修改前已生成 root-owned、同权限的时间戳备份；release `20260724T081806Z-9d6a23cf6523` 完成服务器端全量 check/build、原子切换和内外网 health/readiness 验证，旧 `workbuddy-copilot.service` 保持 active。
+- 线上真实 AI 验收：一次性学员在网页提交问题后得到 51 字符的非 fallback 回复并落入 timeline；一次性导师对同一会话生成 37 字符的非空 AI 草稿。最终校正版脚本两条路径同轮 PASS。
+- 验收脚本首两轮在导师学员按钮处超时，但每轮均在进入 `finally` 后完成清理；分层诊断确认 mentor Auth、`mentor/team_admin` roles、active staff 和 RLS 查询均正常，网页也已收到学员列表。根因是脚本错误使用 exact accessible-name，而按钮名称还包含状态文本；改回项目既有的非 exact locator 后通过，未改业务代码。
+- 清理审计：Auth 用户数验收前后均为 4；本轮 `AI线上验收学员` / `诊断学员` / `aimentor` / `aiadmin` / `diag*` 临时 student、staff 和 Auth 记录均为 0。
 - 最终独立复审：No findings；两项原 Important 均已关闭，新增负控能在旧实现下稳定变红。
