@@ -60,6 +60,11 @@ type TimelineDelivery = TimelineDeliveryRecord & {
 
 const toEpoch = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
 
+// 下行未启用阶段的静态提示：本期导师消息只会落库并进入投递队列，不会被推送到学员的
+// WorkBuddy 客户端。下行开通后，删除本常量及 TimelinePanel 中引用它的唯一渲染点即可。
+const MENTOR_DOWNSTREAM_DISABLED_NOTICE =
+  "下行推送暂未开通：消息会保存并排入投递队列，但目前不会显示在学员的 WorkBuddy 里。";
+
 function MentorDesk() {
   const navigate = useNavigate();
   const [students, setStudents] = useState<Student[]>([]);
@@ -770,7 +775,8 @@ function MentorDesk() {
             )}
           </div>
           <span className="ml-auto text-[11px] text-amber-700/80 dark:text-amber-300/70">
-            提示：请检查 WorkBuddy 是否仍在调用 log_turn
+            提示：请确认学员已重启 WorkBuddy、hook 是否已注册，并检查本机 workbuddy-sync status
+            队列是否堆积
           </span>
         </div>
       )}
@@ -1285,6 +1291,11 @@ function TimelinePanel({
         )}
       </div>
       <div className="shrink-0 border-t bg-card px-6 py-3">
+        {!isStudent && (
+          <p className="mb-1.5 text-[11px] text-amber-700/90 dark:text-amber-300/80">
+            {MENTOR_DOWNSTREAM_DISABLED_NOTICE}
+          </p>
+        )}
         <form onSubmit={onSend} className="flex items-center gap-2">
           <input
             type="text"

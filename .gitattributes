@@ -1,2 +1,14 @@
 connectors/workbuddy-sync.mjs text eol=lf
 public/downloads/workbuddy-sync.mjs text eol=lf
+connectors/workbuddy-transcript.mjs text eol=lf
+public/downloads/workbuddy-transcript.mjs text eol=lf
+connectors/workbuddy-event-id.mjs text eol=lf
+public/downloads/workbuddy-event-id.mjs text eol=lf
+connectors/workbuddy-hook.mjs text eol=lf
+public/downloads/workbuddy-hook.mjs text eol=lf
+connectors/install-macos.sh text eol=lf
+public/downloads/install-macos.sh text eol=lf
+connectors/install-windows.ps1 text eol=lf
+public/downloads/install-windows.ps1 text eol=lf
+connectors/detect-runtime.sh text eol=lf
+public/downloads/detect-runtime.sh text eol=lf

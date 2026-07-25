@@ -137,7 +137,26 @@ jobs:
       - name: Exercise the POSIX installer and permissions
         if: runner.os != 'Windows'
         shell: sh
-        run: sh tests/connectors/test-posix.sh
+        run: WORKBUDDY_NODE="$(command -v node)" sh tests/connectors/test-posix.sh
+      - name: Explain Windows coverage gaps
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "=============================================================================="
+          Write-Host "WINDOWS COVERAGE GAPS — CI IS NOT FULL WINDOWS VALIDATION"
+          Write-Host "=============================================================================="
+          Write-Host "This runner has no WorkBuddy installation. The Windows test asserts only the"
+          Write-Host "plain PATH-node fallback; a detected WorkBuddy/Electron runtime fails the test."
+          Write-Host ""
+          Write-Host "Still requires a real, logged-in Windows WorkBuddy/CodeBuddy machine:"
+          Write-Host "  1. The actual Windows WorkBuddy Electron executable name and installed path."
+          Write-Host "  2. Whether ELECTRON_RUN_AS_NODE=1 <exe> -p 'process.versions.node' returns 22.x."
+          Write-Host "  3. The actual ~/.workbuddy/binaries/node/versions/<v>/ layout: node.exe at"
+          Write-Host "     the version root or under bin\\."
+          Write-Host "  4. How CodeBuddy hands settings.json hook commands to Git Bash, including"
+          Write-Host "     whether '|| true' is parsed as shell syntax. This needs a real login and"
+          Write-Host "     at least one conversation; CI cannot simulate it."
+          Write-Host "=============================================================================="
       - name: Exercise the Windows installer, ACL, wrapper, and Skill
         if: runner.os == 'Windows'
         shell: pwsh

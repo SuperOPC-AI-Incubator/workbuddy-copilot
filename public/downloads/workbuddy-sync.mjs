@@ -9,6 +9,14 @@ import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
+import { deriveEventId } from "./workbuddy-event-id.mjs";
+import {
+  buildTurnEvent,
+  parseTranscriptTail,
+  readSessionCwd,
+  readSessionTitle,
+} from "./workbuddy-transcript.mjs";
+
 const CONNECTOR_VERSION = "1.0.0";
 const USER_AGENT = `SuperBrainCopilot-WorkBuddy/${CONNECTOR_VERSION}`;
 const EVENT_MAX_BYTES = 200_000;
@@ -25,6 +33,23 @@ export const LIVE_PID_GRACE_MS = Math.min(
   Math.max(MIN_LIVE_PID_GRACE_MS, DEFAULT_LOCK_STALE_MS * 5),
 );
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** CLI flags that take no value. */
+const BOOLEAN_OPTIONS = new Set(["--token-stdin", "--no-send", "--dry-run"]);
+
+/** Backfill window is a hard ceiling: mentors only ever see the last 7 days. */
+const IMPORT_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
+const IMPORT_DEFAULT_WINDOW = "7d";
+const IMPORT_MAX_FILE_BYTES = 8 * 1_024 * 1_024;
+const IMPORT_DEFAULT_THROTTLE_MS = 300;
+const IMPORT_MAX_THROTTLE_MS = 60_000;
+const FATAL_IMPORT_CODES = new Set([
+  "NOT_CONFIGURED",
+  "INVALID_CONFIG",
+  "CREDENTIAL_INVALID",
+  "INVALID_API_URL",
+  "INSECURE_API_URL",
+]);
 
 export class ConnectorError extends Error {
   constructor(code, message, details = {}) {
@@ -1241,6 +1266,348 @@ export function createWorkbuddyConnector(options = {}) {
   };
 }
 
+/** `7d` / `12h` → milliseconds. Anything wider than 7 days is refused outright. */
+export function parseSinceWindow(value) {
+  const raw = typeof value === "string" && value.trim() ? value.trim() : IMPORT_DEFAULT_WINDOW;
+  const match = /^(\d{1,5})([dh])$/.exec(raw);
+  if (!match) {
+    throw new ConnectorError("INVALID_ARGUMENTS", "--since must look like 7d or 12h");
+  }
+  const amount = Number(match[1]);
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new ConnectorError("INVALID_ARGUMENTS", "--since must be a positive amount");
+  }
+  const milliseconds = amount * (match[2] === "d" ? 86_400_000 : 3_600_000);
+  if (milliseconds > IMPORT_MAX_WINDOW_MS) {
+    throw new ConnectorError(
+      "SINCE_WINDOW_TOO_LARGE",
+      "--since cannot exceed 7d; the import window is a hard ceiling",
+    );
+  }
+  return { milliseconds, label: raw };
+}
+
+function parseThrottleMs(value) {
+  if (value === undefined) return IMPORT_DEFAULT_THROTTLE_MS;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > IMPORT_MAX_THROTTLE_MS) {
+    throw new ConnectorError("INVALID_ARGUMENTS", "--throttle-ms must be between 0 and 60000");
+  }
+  return Math.floor(parsed);
+}
+
+async function listSessionFiles(projectsDir) {
+  let entries;
+  try {
+    entries = await readdir(projectsDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new ConnectorError("PROJECTS_DIR_MISSING", "WorkBuddy projects directory is missing");
+    }
+    throw error;
+  }
+  const files = [];
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      let inner;
+      try {
+        inner = await readdir(join(projectsDir, entry.name));
+      } catch {
+        continue;
+      }
+      for (const name of inner) {
+        if (name.endsWith(".jsonl")) files.push(join(projectsDir, entry.name, name));
+      }
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(join(projectsDir, entry.name));
+    }
+  }
+  return files;
+}
+
+async function collectImportCandidates(projectsDir, windowMs, nowMs) {
+  const files = await listSessionFiles(projectsDir);
+  const candidates = [];
+  let excluded = 0;
+  for (const path of files) {
+    let metadata;
+    try {
+      metadata = await stat(path);
+    } catch {
+      continue;
+    }
+    if (!metadata.isFile()) continue;
+    if (nowMs - metadata.mtimeMs > windowMs) {
+      excluded += 1;
+      continue;
+    }
+    // The filename stem is the WorkBuddy session id, which is exactly what the
+    // Stop hook reports as source_session_key. That is what makes the two paths
+    // converge on the same event ids.
+    candidates.push({
+      path,
+      sessionId: basename(path, ".jsonl"),
+      mtimeMs: metadata.mtimeMs,
+      size: metadata.size,
+    });
+  }
+  candidates.sort(
+    (left, right) => left.mtimeMs - right.mtimeMs || (left.path < right.path ? -1 : 1),
+  );
+  return { candidates, excluded, scanned: files.length };
+}
+
+async function readSessionBody(path, size) {
+  if (size <= IMPORT_MAX_FILE_BYTES) {
+    return { body: await readFile(path), omittedBytes: 0 };
+  }
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(IMPORT_MAX_FILE_BYTES);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      IMPORT_MAX_FILE_BYTES,
+      size - IMPORT_MAX_FILE_BYTES,
+    );
+    return {
+      body: buffer.subarray(0, bytesRead),
+      omittedBytes: Math.max(0, size - bytesRead),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** A hard backfill window needs a trustworthy, serializable user timestamp. */
+function classifyImportTimestamp(userTimestamp, windowStartMs, nowMs) {
+  if (userTimestamp === null || userTimestamp === undefined) return "missing";
+  if (
+    typeof userTimestamp !== "number" ||
+    !Number.isFinite(userTimestamp) ||
+    userTimestamp <= 0 ||
+    !Number.isFinite(new Date(userTimestamp).getTime())
+  ) {
+    return "invalid";
+  }
+  if (userTimestamp < windowStartMs || userTimestamp > nowMs) return "outside";
+  return "inside";
+}
+
+function defaultProjectsDirectory() {
+  const workbuddyHome = process.env.WORKBUDDY_HOME;
+  const root =
+    typeof workbuddyHome === "string" && workbuddyHome.trim()
+      ? workbuddyHome
+      : join(homedir(), ".workbuddy");
+  return join(root, "projects");
+}
+
+/**
+ * Backfill recent WorkBuddy sessions into the outbox and ship them one at a time.
+ *
+ * Reuses the connector's existing durability layer (validate → atomic enqueue →
+ * flush) so nothing about ordering, claiming or retry behaviour changes; import
+ * only decides *what* to enqueue and *how fast* to drain.
+ */
+async function importSessions(connector, parsed, { stderr, now = Date.now } = {}) {
+  const projectsDir = parsed.projectsDir || defaultProjectsDirectory();
+  const window = parseSinceWindow(parsed.since);
+  const throttleMs = parseThrottleMs(parsed.throttleMs);
+  const dryRun = parsed.dryRun === true;
+  const importStartedAt = now();
+  const windowStart = importStartedAt - window.milliseconds;
+  const sleep = (milliseconds) =>
+    milliseconds > 0
+      ? new Promise((resolve) => setTimeout(resolve, milliseconds))
+      : Promise.resolve();
+
+  const { candidates, excluded, scanned } = await collectImportCandidates(
+    projectsDir,
+    window.milliseconds,
+    importStartedAt,
+  );
+
+  // Never truncate silently: a mentor must know the view is partial.
+  stderr(
+    `workbuddy-import: scanned ${scanned} session file(s) under ${projectsDir}; ` +
+      `${candidates.length} inside the ${window.label} window, ` +
+      `excluded_sessions=${excluded} older than ${window.label}`,
+  );
+
+  const summary = {
+    ok: true,
+    dryRun,
+    projectsDir,
+    window: window.label,
+    scannedSessions: scanned,
+    eligibleSessions: candidates.length,
+    excludedSessions: excluded,
+    sessionsWithTurns: 0,
+    turns: 0,
+    truncatedTurns: 0,
+    skippedTurns: 0,
+    partialSessions: 0,
+    truncatedSessions: 0,
+    omittedBytes: 0,
+    excludedTurns: 0,
+    missingTimestampTurns: 0,
+    invalidTimestampTurns: 0,
+    queued: 0,
+    sent: 0,
+    duplicate: 0,
+    retained: 0,
+    quarantined: 0,
+    failedTurns: 0,
+  };
+
+  for (const candidate of candidates) {
+    let sessionBody;
+    try {
+      sessionBody = await readSessionBody(candidate.path, candidate.size);
+    } catch (error) {
+      stderr(
+        `workbuddy-import: unreadable session ${candidate.sessionId} (${error?.code ?? "ERROR"})`,
+      );
+      continue;
+    }
+    if (sessionBody.omittedBytes > 0) {
+      summary.partialSessions += 1;
+      summary.truncatedSessions += 1;
+      summary.omittedBytes += sessionBody.omittedBytes;
+      stderr(
+        `workbuddy-import: session ${candidate.sessionId} truncated to the final ` +
+          `${IMPORT_MAX_FILE_BYTES} bytes; omitted_bytes=${sessionBody.omittedBytes}`,
+      );
+    }
+    const parsedTranscript = parseTranscriptTail(sessionBody.body);
+    if (
+      sessionBody.omittedBytes === 0 &&
+      (parsedTranscript.droppedLeadingPartial || parsedTranscript.droppedTrailingPartial)
+    ) {
+      summary.partialSessions += 1;
+    }
+
+    const inWindowTurns = [];
+    for (const turn of parsedTranscript.turns) {
+      const timestampState = classifyImportTimestamp(
+        turn.userTimestamp,
+        windowStart,
+        importStartedAt,
+      );
+      if (timestampState === "inside") {
+        inWindowTurns.push(turn);
+        continue;
+      }
+      if (timestampState === "missing") {
+        summary.missingTimestampTurns += 1;
+        stderr(
+          `workbuddy-import: skipped turn ${candidate.sessionId}/${turn.userMessageId} ` +
+            "(MISSING_USER_TIMESTAMP)",
+        );
+      } else if (timestampState === "invalid") {
+        summary.invalidTimestampTurns += 1;
+        stderr(
+          `workbuddy-import: skipped turn ${candidate.sessionId}/${turn.userMessageId} ` +
+            "(INVALID_USER_TIMESTAMP)",
+        );
+      } else {
+        summary.excludedTurns += 1;
+      }
+    }
+    if (inWindowTurns.length === 0) continue;
+    summary.sessionsWithTurns += 1;
+
+    // Deliberately NOT parsedTranscript.sessionTitle: import sees the whole file
+    // while the Stop hook only sees a bounded window. Both must resolve the title
+    // from the same bounded view or they build conflicting payloads for one
+    // event_id, and the 409 path quarantines one of them.
+    let sessionTitle = null;
+    try {
+      sessionTitle = await readSessionTitle({ open }, candidate.path);
+    } catch (error) {
+      stderr(
+        `workbuddy-import: title lookup failed for ${candidate.sessionId} (${error?.code ?? "ERROR"})`,
+      );
+    }
+
+    // Canonical cwd is deliberately read from the first transcript message,
+    // never from a recent tail or hook stdin: it is part of the idempotent event
+    // payload and must not change as the session evolves.
+    let cwd = null;
+    try {
+      cwd = await readSessionCwd({ open }, candidate.path);
+    } catch (error) {
+      stderr(
+        `workbuddy-import: cwd lookup failed for ${candidate.sessionId} (${error?.code ?? "ERROR"})`,
+      );
+    }
+
+    for (const turn of inWindowTurns) {
+      const eventId = deriveEventId(candidate.sessionId, turn.userMessageId);
+      const event = buildTurnEvent({
+        turn,
+        sourceSessionKey: candidate.sessionId,
+        sessionTitle,
+        cwd,
+        eventId,
+      });
+      if (!event) {
+        summary.skippedTurns += 1;
+        continue;
+      }
+      summary.turns += 1;
+      // Oversized turns are cut with a visible marker, never dropped.
+      if (
+        turn.promptText.length > event.prompt.length ||
+        turn.replyText.length > event.reply.length
+      ) {
+        summary.truncatedTurns += 1;
+      }
+      if (dryRun) continue;
+
+      try {
+        const queued = await connector.enqueueEvent(event);
+        if (queued.queued) summary.queued += 1;
+        const flushed = await connector.flush();
+        summary.sent += flushed.sent ?? 0;
+        summary.duplicate += flushed.duplicate ?? 0;
+        summary.retained += flushed.retained ?? 0;
+        summary.quarantined += flushed.quarantined ?? 0;
+      } catch (error) {
+        const code = error instanceof ConnectorError ? error.code : "CONNECTOR_ERROR";
+        if (FATAL_IMPORT_CODES.has(code)) throw error;
+        summary.failedTurns += 1;
+        stderr(`workbuddy-import: turn ${eventId} failed (${code})`);
+      }
+      await sleep(throttleMs);
+    }
+  }
+
+  if (summary.truncatedTurns > 0) {
+    stderr(
+      `workbuddy-import: truncated_turns=${summary.truncatedTurns} (content cut, not dropped)`,
+    );
+  }
+  if (summary.excludedTurns > 0) {
+    stderr(
+      `workbuddy-import: excluded_turns=${summary.excludedTurns} outside the ${window.label} window`,
+    );
+  }
+  if (summary.missingTimestampTurns > 0) {
+    stderr(
+      `workbuddy-import: missing_timestamp_turns=${summary.missingTimestampTurns} ` +
+        "(excluded to preserve the hard time window)",
+    );
+  }
+  if (summary.invalidTimestampTurns > 0) {
+    stderr(`workbuddy-import: invalid_timestamp_turns=${summary.invalidTimestampTurns}`);
+  }
+  return summary;
+}
+
 function parseOptions(args, allowed) {
   const result = {};
   for (let index = 0; index < args.length; index += 1) {
@@ -1248,8 +1615,8 @@ function parseOptions(args, allowed) {
     if (!argument.startsWith("--") || !allowed.has(argument)) {
       throw new ConnectorError("INVALID_ARGUMENTS", "Command arguments are invalid");
     }
-    if (argument === "--token-stdin") {
-      result.tokenStdin = true;
+    if (BOOLEAN_OPTIONS.has(argument)) {
+      result[argument.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = true;
       continue;
     }
     const value = args[index + 1];
@@ -1339,11 +1706,31 @@ export async function runCli(argv, options = {}) {
         break;
       }
       case "sync": {
-        const parsed = parseOptions(args, new Set(["--event-file"]));
+        const parsed = parseOptions(args, new Set(["--event-file", "--no-send"]));
         if (!parsed.eventFile) {
           throw new ConnectorError("INVALID_ARGUMENTS", "--event-file is required");
         }
+        if (parsed.noSend) {
+          // Validate + atomically enqueue only. The hook runs this path so it
+          // never touches the network on WorkBuddy's critical path.
+          const event = validateWorkbuddyEvent(
+            safeJsonParse(
+              await readBoundedFile(parsed.eventFile, EVENT_MAX_BYTES),
+              "INVALID_EVENT",
+            ),
+          );
+          result = { ...(await connector.enqueueEvent(event)), sent: 0, noSend: true };
+          break;
+        }
         result = await connector.syncEventFile(parsed.eventFile);
+        break;
+      }
+      case "import": {
+        const parsed = parseOptions(
+          args,
+          new Set(["--projects-dir", "--since", "--throttle-ms", "--dry-run"]),
+        );
+        result = await importSessions(connector, parsed, { stderr });
         break;
       }
       case "fetch": {
@@ -1376,7 +1763,7 @@ export async function runCli(argv, options = {}) {
       default:
         throw new ConnectorError(
           "INVALID_COMMAND",
-          "Use configure, sync, fetch, ack, flush, status, or test-connection",
+          "Use configure, sync, import, fetch, ack, flush, status, or test-connection",
         );
     }
     stdout(JSON.stringify(result));
