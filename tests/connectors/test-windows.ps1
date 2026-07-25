@@ -127,7 +127,16 @@ try {
     $process.Dispose()
   }
   if ($exitCode -ne 0) {
-    throw "Windows connector installer failed with exit code $exitCode."
+    # 失败时必须把安装器的实际输出带出来，否则 CI 上只看得到一个退出码，
+    # 本机又没有 pwsh 可复现，等于无法诊断。
+    $detail = @(
+      "Windows connector installer failed with exit code ${exitCode}.",
+      "--- installer stdout ---",
+      $stdout,
+      "--- installer stderr ---",
+      $stderr
+    ) -join [Environment]::NewLine
+    throw $detail
   }
   $pathNode = (Get-Command node -CommandType Application -ErrorAction Stop).Source
   $runtimeMatch = [regex]::Match(
