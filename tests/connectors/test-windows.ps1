@@ -309,7 +309,7 @@ try {
     $hookProcess.Dispose()
   }
   if ($hookExitCode -ne 0) {
-    throw "Git Bash hook invocation failed with exit code $hookExitCode: $hookStderr"
+    throw "Git Bash hook invocation failed with exit code ${hookExitCode}: $hookStderr"
   }
   $outboxAfter = @(Get-ChildItem -LiteralPath $outbox -Filter "*.json" -File).Count
   if ($outboxAfter -ne ($outboxBefore + 1)) {

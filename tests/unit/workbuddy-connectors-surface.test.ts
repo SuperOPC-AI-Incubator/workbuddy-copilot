@@ -55,6 +55,34 @@ async function runInstallerWithInput(
   });
 }
 
+// PowerShell 把双引号字符串里的 `$name:` 解析成作用域限定符（如 $env:PATH），
+// 所以 "exit code $code: $msg" 会直接 ParserError。本机没有 pwsh 无法解析校验，
+// 这条守卫用静态扫描兜住这一类最常见的语法错误，避免每次都靠 CI 往返发现。
+const POWERSHELL_SCOPES = new Set([
+  "env",
+  "script",
+  "global",
+  "local",
+  "private",
+  "using",
+  "variable",
+  "function",
+  "alias",
+  "workflow",
+]);
+
+function findInvalidScopeQualifiers(source: string): string[] {
+  const found: string[] = [];
+  source.split("\n").forEach((line, index) => {
+    for (const match of line.matchAll(/\$(\w+):/g)) {
+      if (!POWERSHELL_SCOPES.has(match[1].toLowerCase())) {
+        found.push(`line ${index + 1}: ${match[0]}`);
+      }
+    }
+  });
+  return found;
+}
+
 describe("fallback connector installers", () => {
   test("POSIX installer is idempotent, keeps user-only permissions, and installs a token-free SKILL", async () => {
     if (process.platform === "win32") return;
@@ -321,5 +349,27 @@ describe("WorkBuddy setup surface", () => {
     expect(skill).toMatch(/__WORKBUDDY_CONNECTOR_ENTRYPOINT__[\s\S]*fetch/);
     expect(skill).not.toMatch(/(^|[\s`])workbuddy-sync\.mjs(?:[\s`]|$)/m);
     expect(skill).not.toMatch(/Authorization|Bearer|WORKBUDDY_CREDENTIAL|wb_[A-Za-z0-9_-]+/);
+  });
+});
+
+describe("PowerShell scripts avoid invalid scope-qualifier interpolation", () => {
+  const scripts = [
+    "connectors/install-windows.ps1",
+    "public/downloads/install-windows.ps1",
+    "tests/connectors/test-windows.ps1",
+  ];
+
+  test.each(scripts)("%s interpolates variables PowerShell can parse", async (relative) => {
+    const source = await readFile(resolve(root, relative), "utf8");
+    expect(findInvalidScopeQualifiers(source)).toEqual([]);
+  });
+
+  test("detects the exact pattern that broke CI", () => {
+    // 负控：这正是 test-windows.ps1:312 上让 pwsh ParserError 的原文
+    expect(
+      findInvalidScopeQualifiers('throw "failed with exit code $hookExitCode: $hookStderr"'),
+    ).toEqual(["line 1: $hookExitCode:"]);
+    // 合法的作用域限定符不得误报
+    expect(findInvalidScopeQualifiers("$env:PATH; $script:x; $using:y")).toEqual([]);
   });
 });
