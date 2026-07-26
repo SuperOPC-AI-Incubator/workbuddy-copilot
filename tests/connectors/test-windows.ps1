@@ -413,7 +413,13 @@ try {
     $defaultProcess.Dispose()
   }
   if ($defaultExitCode -ne 0) {
-    throw "Default Windows connector installer failed with exit code $defaultExitCode."
+    throw (@(
+      "Default Windows connector installer failed with exit code ${defaultExitCode}.",
+      "--- stdout ---",
+      $defaultStdout,
+      "--- stderr ---",
+      $defaultStderr
+    ) -join [Environment]::NewLine)
   }
   if ($defaultStdout.Contains($env:CONNECTOR_TEST_TOKEN) -or $defaultStderr.Contains($env:CONNECTOR_TEST_TOKEN)) {
     throw "Default Windows connector installer output leaked credential material."
@@ -536,7 +542,13 @@ try {
   }
   $backgroundImportStopwatch.Stop()
   if ($importExitCode -ne 0) {
-    throw "Background import installer failed with exit code $importExitCode."
+    throw (@(
+      "Background import installer failed with exit code ${importExitCode}.",
+      "--- stdout ---",
+      $importStdout,
+      "--- stderr ---",
+      $importStderr
+    ) -join [Environment]::NewLine)
   }
   if ($backgroundImportStopwatch.Elapsed.TotalSeconds -gt 8) {
     throw "Background import installer exceeded the eight-second non-blocking budget."
