@@ -7,6 +7,21 @@ if ([string]::IsNullOrWhiteSpace($env:CONNECTOR_TEST_TOKEN)) {
 }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+
+# 仓库根一旦算错，后面会以一个含义不明的退出码失败（CI 上实测过 pwsh 的 64），
+# 而本机没有 pwsh 无法复现。所以在这里就自证路径，并把判定依据全部带进错误信息。
+$ExpectedInstaller = Join-Path $Root "connectors\install-windows.ps1"
+if (-not (Test-Path -LiteralPath $ExpectedInstaller -PathType Leaf)) {
+  throw (@(
+    "Repository root resolution failed; the Windows installer is not where the test expects it.",
+    "  PSScriptRoot      = $PSScriptRoot",
+    "  Root              = $Root",
+    "  ExpectedInstaller = $ExpectedInstaller",
+    "  PWD               = $((Get-Location).Path)",
+    "  PSCommandPath     = $PSCommandPath"
+  ) -join [Environment]::NewLine)
+}
+Write-Host "Repo root: $Root"
 $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("superbrain-connector-" + [guid]::NewGuid())
 $OriginalUserProfile = $env:USERPROFILE
 $OriginalLocalAppData = $env:LOCALAPPDATA
