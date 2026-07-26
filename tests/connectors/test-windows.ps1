@@ -167,7 +167,10 @@ try {
     ) -join [Environment]::NewLine
     throw $detail
   }
-  $pathNode = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+  # Windows runner 的 PATH 里有多个 node（hostedtoolcache 与 Program Files\nodejs），
+  # Get-Command 会返回多项，.Source 就成了数组。PATH 解析实际取第一个，断言必须一致。
+  $pathNode = (Get-Command node -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1).Source
   $runtimeMatch = [regex]::Match(
     $stdout,
     '(?m)^Runtime:\s+(?<path>.+?)\s+\((?<mode>plain|electron), node (?<version>\d+\.\d+\.\d+)\)\s*$'
@@ -273,7 +276,9 @@ try {
     throw "Windows connector registered an unexpected Git Bash hook command: $($registeredHook.command)"
   }
 
-  $gitBash = (Get-Command bash -CommandType Application -ErrorAction Stop).Source
+  # 同上：Windows 上可能同时存在 Git Bash 与 WSL 的 bash，取 PATH 实际解析的第一个。
+  $gitBash = (Get-Command bash -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1).Source
   & $gitBash -n $bashHookPath
   if ($LASTEXITCODE -ne 0) {
     throw "Generated Git Bash hook script failed bash -n syntax validation."
