@@ -570,7 +570,26 @@ try {
     Start-Sleep -Milliseconds 100
   } while ([DateTime]::UtcNow -lt $importLogDeadline)
   if (-not $importLogReady) {
-    throw "Background import did not create the expected import log in the sandbox profile."
+    # 区分「日志没生成」与「日志内容不符」——此前两种失败共用一条信息，
+    # 每次 CI 只能知道哪条断言红了，看不出原因。这里把现场全带出来。
+    $logExists = Test-Path -LiteralPath $ImportLog -PathType Leaf
+    $actualLog = if ($logExists) { Get-Content -LiteralPath $ImportLog -Raw } else { "(日志文件不存在)" }
+    $logDir = Split-Path -Parent $ImportLog
+    $dirListing = if (Test-Path -LiteralPath $logDir) {
+      (Get-ChildItem -LiteralPath $logDir -Force | ForEach-Object { $_.Name }) -join ", "
+    }
+    else { "(日志目录不存在)" }
+    $sessionFiles = @(Get-ChildItem -LiteralPath $ImportProjects -Filter "*.jsonl" -Recurse -ErrorAction SilentlyContinue)
+    throw (@(
+      "Background import did not produce the expected log.",
+      "  logPath        = $ImportLog",
+      "  logExists      = $logExists",
+      "  logDir entries = $dirListing",
+      "  projectsDir    = $ImportProjects",
+      "  sessionFiles   = $($sessionFiles.Count)",
+      "--- log content ---",
+      $actualLog
+    ) -join [Environment]::NewLine)
   }
 
   # 学员实际下载到的那份必须和仓库里的规范版本逐字节一致。
