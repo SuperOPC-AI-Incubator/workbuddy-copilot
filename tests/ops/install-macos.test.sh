@@ -351,6 +351,43 @@ done
 grep -F '"window":"7d"' "$SB/state/superbrain-copilot/logs/import.log" >/dev/null
 check $? "后台补传按 7d 窗口真的跑了（import.log 有结果）"
 
+echo "== E2) --no-hook 安装：connector 仍必须能独立运行"
+# workbuddy-sync.mjs 自身 import transcript / event-id。若把它们错归为 hook 的
+# 依赖，--no-hook 装出来的 connector 一运行就 ERR_MODULE_NOT_FOUND。
+# 这是 Windows CI 上真实发生过的产品缺陷，必须有用例守住。
+rm -rf "$SB/home-nohook" "$SB/state-nohook"
+mkdir -p "$SB/home-nohook/.workbuddy"
+printf 'wb_nohook_token_1234567890\n' | install_sandbox "$SB/home-nohook" "$SB/state-nohook" \
+  install --api-url "https://copilot.example.test" --no-schedule --no-import --no-hook \
+  >"$SB/install-e2.log" 2>&1
+check $? "--no-hook 安装成功"
+
+NOHOOK_APP="$SB/home-nohook/.local/share/superbrain-copilot"
+for module in workbuddy-sync.mjs workbuddy-transcript.mjs workbuddy-event-id.mjs; do
+  test -f "$NOHOOK_APP/$module"
+  check $? "--no-hook 仍安装了 connector 依赖 $module"
+done
+
+# 真跑一次并放一个真实会话，确保执行路径真的进入 transcript 解析与 event_id
+# 派生 —— 空目录会提前返回，测不到缺模块。
+NOHOOK_PROJECTS="$SB/nohook-projects/proj"
+mkdir -p "$NOHOOK_PROJECTS"
+now_ms=$(( $(date +%s) * 1000 ))
+{
+  printf '{"id":"nh-u","type":"message","role":"user","timestamp":%s,"cwd":"/tmp/nh","content":[{"type":"text","text":"no-hook 用例提问"}]}\n' "$now_ms"
+  printf '{"id":"nh-a","type":"message","role":"assistant","timestamp":%s,"content":[{"type":"text","text":"no-hook 用例回复"}]}\n' "$now_ms"
+} >"$NOHOOK_PROJECTS/aaaaaaaa-1111-4111-8111-999999999999.jsonl"
+NOHOOK_PROJECTS="$SB/nohook-projects"
+
+# 这一步在缺模块时会以 ERR_MODULE_NOT_FOUND 失败。
+env -u ELECTRON_RUN_AS_NODE HOME="$SB/home-nohook" XDG_STATE_HOME="$SB/state-nohook" \
+  WORKBUDDY_HOME="$SB/home-nohook/.workbuddy" \
+  "$SB/home-nohook/.local/bin/workbuddy-sync" import --dry-run --projects-dir "$NOHOOK_PROJECTS" \
+  >"$SB/nohook-import.log" 2>&1
+check $? "--no-hook 下 workbuddy-sync import 可运行"
+grep -F "ERR_MODULE_NOT_FOUND" "$SB/nohook-import.log" >/dev/null && {
+  echo "FAIL - import 报了 ERR_MODULE_NOT_FOUND"; FAILED=$((FAILED + 1)); }
+
 echo "== F) 无可用运行时：安装中止"
 # 造一个连 node 都没有的 PATH：只把安装器在中止前会用到的外部命令软链进来，不含 node。
 NONODE_BIN="$SB/nonode-bin"

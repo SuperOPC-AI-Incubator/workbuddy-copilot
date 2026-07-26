@@ -48,8 +48,11 @@ $HookMarker = "workbuddy-hook.sh"
 # hook 的本地总预算最多 4 秒；15 秒的 WorkBuddy timeout 留出明显余量。
 $HookTimeoutSeconds = 15
 $MinimumNodeMajor = 22
-$ConnectorModules = @("workbuddy-sync.mjs")
-$HookModules = @("workbuddy-hook.mjs", "workbuddy-transcript.mjs", "workbuddy-event-id.mjs")
+# workbuddy-sync.mjs 自身就 import transcript / event-id（import 子命令要用），
+# 因此它们是 connector 的依赖，不是 hook 的。归错类会让 -NoHook 安装出来的
+# connector 一运行就 ERR_MODULE_NOT_FOUND。
+$ConnectorModules = @("workbuddy-sync.mjs", "workbuddy-transcript.mjs", "workbuddy-event-id.mjs")
+$HookModules = @("workbuddy-hook.mjs")
 
 # ---------------------------------------------------------------------------
 # 运行时探测
@@ -580,7 +583,7 @@ if ($Action -eq "Uninstall") {
   }
   $removable = @($Connector, $HookEntry, $HookWrapper, $SettingsHelper, $SkillTemplate, $Wrapper,
     $Runner, $InstalledSkill)
-  foreach ($module in $HookModules) {
+  foreach ($module in @($ConnectorModules) + @($HookModules)) {
     $removable += (Join-Path $InstallRoot $module)
   }
   Remove-Item -LiteralPath $removable -Force -ErrorAction SilentlyContinue

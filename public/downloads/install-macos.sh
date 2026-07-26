@@ -92,8 +92,11 @@ HOOK_MARKER=workbuddy-hook.sh
 # 给 WorkBuddy 留出足够余量，且不会把 Stop 关键路径拖到注册上限。
 HOOK_TIMEOUT=15
 # 上行 hook 依赖的模块，必须与安装脚本一起下载。
-CONNECTOR_MODULES="workbuddy-sync.mjs"
-HOOK_MODULES="workbuddy-hook.mjs workbuddy-transcript.mjs workbuddy-event-id.mjs"
+# workbuddy-sync.mjs 自身就 import transcript / event-id（import 子命令要用），
+# 因此它们是 connector 的依赖，不是 hook 的。归错类会让 --no-hook 安装出来的
+# connector 一运行就 ERR_MODULE_NOT_FOUND。
+CONNECTOR_MODULES="workbuddy-sync.mjs workbuddy-transcript.mjs workbuddy-event-id.mjs"
+HOOK_MODULES="workbuddy-hook.mjs"
 
 shell_quote() {
   printf "'"
@@ -381,7 +384,7 @@ if [ "$ACTION" = "uninstall" ]; then
   fi
   rm -f "$CONNECTOR" "$HOOK_ENTRY" "$HOOK_WRAPPER" "$SKILL_TEMPLATE" "$RUNNER" "$WRAPPER" \
     "$INSTALLED_SKILL" "$SETTINGS_HELPER"
-  for module in $HOOK_MODULES; do
+  for module in $CONNECTOR_MODULES $HOOK_MODULES; do
     rm -f "$INSTALL_ROOT/$module"
   done
   rmdir "$WORKBUDDY_SKILL_DIR" 2>/dev/null || true
