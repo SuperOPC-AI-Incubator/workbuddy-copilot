@@ -35,10 +35,12 @@ $OriginalElectronCandidates = $env:WORKBUDDY_ELECTRON_CANDIDATES
 $RealElectronCandidates = @()
 foreach ($base in @($OriginalLocalAppData, $env:PROGRAMFILES, ${env:ProgramFiles(x86)})) {
   if ([string]::IsNullOrWhiteSpace($base)) { continue }
-  foreach ($root in @((Join-Path $base "Programs"), $base)) {
+  # 变量名不能与脚本级 $Root 只差大小写：PowerShell 变量名大小写不敏感，
+  # 用 $root 会静默覆盖仓库根，且只在 Windows（ProgramFiles(x86) 非空）触发。
+  foreach ($candidateRoot in @((Join-Path $base "Programs"), $base)) {
     foreach ($name in @("WorkBuddy", "CodeBuddy")) {
       foreach ($executable in @("WorkBuddy.exe", "CodeBuddy.exe", "Electron.exe")) {
-        $candidate = Join-Path $root (Join-Path $name $executable)
+        $candidate = Join-Path $candidateRoot (Join-Path $name $executable)
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { $RealElectronCandidates += $candidate }
       }
     }

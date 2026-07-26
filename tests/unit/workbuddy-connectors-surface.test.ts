@@ -83,6 +83,33 @@ function findInvalidScopeQualifiers(source: string): string[] {
   return found;
 }
 
+// PowerShell 变量名大小写不敏感，且 foreach 的循环变量写的是脚本作用域。
+// 因此 `foreach ($root ...)` 会静默覆盖脚本级的 $Root —— CI 上这把仓库根改成了
+// C:\\Program Files (x86)，而 macOS 因 ProgramFiles(x86) 为空永远复现不了。
+// 只检测真正危险的组合：循环变量与脚本级赋值的变量同名（忽略大小写）。
+// 不比较函数参数，它们各自独立作用域，跨函数同名不是缺陷。
+function findLoopVariablesClobberingScriptScope(source: string): string[] {
+  const withoutComments = source
+    .split("\n")
+    .map((line) => line.replace(/#.*$/, ""))
+    .join("\n");
+
+  const scriptScope = new Map<string, string>();
+  for (const match of withoutComments.matchAll(/^\$([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
+    scriptScope.set(match[1].toLowerCase(), match[1]);
+  }
+
+  const clobbered: string[] = [];
+  for (const match of withoutComments.matchAll(
+    /foreach\s*\(\s*\$([A-Za-z_][A-Za-z0-9_]*)\s+in\b/gi,
+  )) {
+    const loopVariable = match[1];
+    const declared = scriptScope.get(loopVariable.toLowerCase());
+    if (declared) clobbered.push(`foreach $${loopVariable} clobbers script-scope $${declared}`);
+  }
+  return [...new Set(clobbered)].sort();
+}
+
 describe("fallback connector installers", () => {
   test("POSIX installer is idempotent, keeps user-only permissions, and installs a token-free SKILL", async () => {
     if (process.platform === "win32") return;
@@ -371,5 +398,30 @@ describe("PowerShell scripts avoid invalid scope-qualifier interpolation", () =>
     ).toEqual(["line 1: $hookExitCode:"]);
     // 合法的作用域限定符不得误报
     expect(findInvalidScopeQualifiers("$env:PATH; $script:x; $using:y")).toEqual([]);
+  });
+});
+
+describe("PowerShell loop variables do not clobber script scope", () => {
+  const scripts = [
+    "connectors/install-windows.ps1",
+    "public/downloads/install-windows.ps1",
+    "tests/connectors/test-windows.ps1",
+  ];
+
+  test.each(scripts)("%s keeps foreach variables out of script scope", async (relative) => {
+    const source = await readFile(resolve(root, relative), "utf8");
+    expect(findLoopVariablesClobberingScriptScope(source)).toEqual([]);
+  });
+
+  test("detects the exact collision that broke Windows CI", () => {
+    expect(
+      findLoopVariablesClobberingScriptScope('$Root = "a"\nforeach ($root in $x) { }'),
+    ).toEqual(["foreach $root clobbers script-scope $Root"]);
+    // 跨函数的同名参数不是缺陷，不得误报
+    expect(
+      findLoopVariablesClobberingScriptScope(
+        "function A { param($Mode) }\nforeach ($mode in $m) { }",
+      ),
+    ).toEqual([]);
   });
 });
