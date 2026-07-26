@@ -83,10 +83,44 @@ WebSocket 客户端、REST 调用、回执账本、去重窗口、重连退避�
 ### 传输
 
 - **POSIX**：Unix domain socket，位于代理私有状态目录，权限 0600
-- **Windows**：命名管道，DACL 仅当前用户
+- **Windows**：命名管道 + **能力令牌**（见下）
 - **不使用 TCP 端口** —— 本机其他用户/进程可连，且要额外管鉴权
 
-同一用户会话内的进程才能连上，靠文件系统/管道权限而非应用层 token 保证。
+### Windows 上为什么必须加能力令牌（实现方发现的阻塞项，已裁决）
+
+Node 的 `net` 只提供 `readableAll` / `writableAll`，**没有按当前 logon SID 设置 security
+descriptor 的 API**；而未显式提供 descriptor 的命名管道默认 DACL 允许 Everyone 读取。
+所以"DACL 仅当前用户"在纯 Node 下无法实现。
+参考：[Node net IPC options](https://nodejs.org/api/net.html)、
+[Microsoft named pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)。
+
+**裁决：不引入 native addon**（那会破坏"零安装"这个已经付出很大代价换来的性质）。改为把
+防线从管道 ACL 移到**能力令牌**：
+
+- 代理启动时生成一个随机令牌，写入其私有状态目录下的文件
+- 该目录在 Windows 上已由安装器设为**仅当前用户**的 ACL，且有既有测试断言这一点；POSIX 上是 0700
+- 壳连接后必须在 `hello` 里出示该令牌，否则代理立刻断开
+- 令牌**不是云端凭证**，离开这台机器没有任何价值，因此不违反"壳不持有凭证"
+- 管道/socket 自身的权限仍尽力设置，作为纵深防御而非唯一防线
+
+这条同时适用于 POSIX（0600 socket 已足够，但令牌统一了壳的实现）。
+
+### 其余已裁决的契约细节
+
+- **`messages.displayed` 的成功响应表示"已接收"，不表示"远端 ack 已完成"**。壳不应被
+  网络重试时长阻塞；代理接收后自行负责最终 ack 与重试
+- **`messages.pending` 的定义**：本地 ledger 中"已拉取但尚未被任何壳声明展示过"的消息。
+  ledger 需要独立于 `acked_at` 的"壳已展示"字段
+- **轮询周期、启动即拉、断网状态转换**：由代理决定并在 `status` 中暴露当前状态，契约不
+  规定具体秒数；壳不得假设固定周期
+- **`agent.shutdown` 只是尽力通知**。代理被强杀时发不出来，因此壳**必须**用连接断开本身
+  作为离线判据，不能依赖收到该事件
+
+### 仍待补的契约细节（壳开工前必须补齐）
+
+`hello` 的完整响应 schema 与能力名称、`status` 与三种 event 的字段枚举、`subscribe` 的
+事件筛选/重复订阅/初始快照/取消/顺序/背压。这些在没有真实壳的情况下容易设计成空想，
+因此**推迟到壳开工时与壳一起定**，不在本期编造。
 
 ### 协议
 
