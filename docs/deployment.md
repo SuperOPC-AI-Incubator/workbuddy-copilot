@@ -42,6 +42,103 @@ buffering so MCP and server-sent event streams are not delayed.
 Both the tracked `.env` and `.env.example` are deliberately empty-value
 templates. They are not deployment configuration and must remain secret-free.
 
+Note that the tracked `.env` defines every key with an empty value, so a build
+that does not inject `VITE_SUPABASE_PROJECT_ID` gets an empty string rather than
+an undefined variable. `src/lib/mcp/index.ts` therefore falls back with `||`, not
+`??`, and `scripts/deploy.sh` rejects a missing or malformed ref before building.
+
+## Hosting account facts
+
+These are the facts a new operator needs and cannot recover from the code.
+
+| Item                  | Value                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| Supabase organization | `wangjialiang678's Org` (`pmkswkoiqbfciyxtdvaf`) — a personal account, not a team organization |
+| Supabase project      | `superbrain-copilot` / `hwxbrkvvziqpvsmyllqn`                                                  |
+| Region                | `ap-southeast-1` (Singapore)                                                                   |
+| Plan                  | Free                                                                                           |
+| Application host      | Tencent Cloud Singapore, `101.32.248.235`, reached as `copilot.sg.superbrain-ai.com`           |
+| Backup location       | `/var/backups/superbrain-copilot/` on that host                                                |
+
+Two consequences of the Free plan, both handled by `scripts/ops/supabase-maintenance.sh`:
+
+- **Projects pause after a week of low activity.** Supabase pauses Free-plan
+  projects that show low activity over a 7-day period, and its own guidance is
+  that "a few user requests to the database each day" is enough to avoid it.
+  Visiting the dashboard does not count; database activity does. A paused project
+  keeps its data and can be resumed from the dashboard within a year, taking
+  roughly 30 seconds to wake.
+- **There are no automatic backups and no point-in-time recovery.** The only
+  copy is the one this repository's cron job produces.
+
+Upgrading to Pro removes the pausing behaviour and adds daily backups with 7-day
+retention. Custom domains are a separate paid add-on, so today every student
+browser and MCP client must reach `hwxbrkvvziqpvsmyllqn.supabase.co` directly;
+see `docs/student-network-check.md` before a camp starts.
+
+The GitHub repository lives in the `SuperOPC-AI-Incubator` organization while the
+Supabase project does not. Moving the project to a team organization is possible
+from the project's general settings, requires ownership of the source
+organization and membership of the target, and cannot change the region.
+
+## Free-plan maintenance cron
+
+`scripts/ops/supabase-maintenance.sh` has two subcommands, deliberately on
+different schedules:
+
+```
+keepalive   one small database request, daily
+backup      pg_dump of the public and auth schemas, weekly, latest copy only
+```
+
+The schedules are not interchangeable. A weekly job alone sits exactly on the
+7-day pausing threshold, so `keepalive` runs daily; the dump is the expensive
+half and runs weekly.
+
+`keepalive` reuses `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` from
+`/etc/superbrain-copilot.env`, so it needs no new credential. Row-level security
+denies the anonymous read and an empty result is expected — the point is that
+PostgREST evaluated the policy against the database.
+
+`backup` needs database credentials that are deliberately absent from the
+application environment file. Create `/etc/superbrain-copilot-backup.env` owned
+by `root:root` with mode `0600`, containing standard libpq variables taken from
+the Supabase dashboard's database settings:
+
+```dotenv
+PGHOST=
+PGPORT=5432
+PGUSER=
+PGPASSWORD=
+PGDATABASE=postgres
+PGSSLMODE=require
+```
+
+Nothing is passed on the command line, so no credential appears in `ps` output.
+
+The dump requires a client at least as new as the server. The project runs
+PostgreSQL 17 and Ubuntu 24.04 ships the 16 client, which refuses to dump a
+newer server outright, so `postgresql-client-17` must be installed from the PGDG
+repository. The script checks this before spending a run.
+
+The dump is verified before it replaces the retained copy: a size floor plus the
+presence of `"public"."students"`, `"public"."timeline_items"` and
+`"auth"."users"`. This ordering exists so a truncated or empty dump can never
+overwrite a good backup. If the `auth` schema cannot be read with the configured
+role, the run fails rather than silently shrinking; retry with
+`BACKUP_SCHEMAS=public` and treat account recovery as a separate problem.
+
+To restore, decompress and apply with a matching client:
+
+```bash
+gunzip -c /var/backups/superbrain-copilot/superbrain-copilot-latest.sql.gz |
+  psql "$CONNECTION_STRING"
+```
+
+The dump is taken with `--clean --if-exists`, so it drops the objects it
+recreates. Never point a restore at the production project unless that is the
+intent.
+
 ## Managed Supabase Auth configuration
 
 The tracked Supabase project is `hwxbrkvvziqpvsmyllqn`. Production Auth intent
