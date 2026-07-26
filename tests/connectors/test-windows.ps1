@@ -119,6 +119,18 @@ try {
   }
   $start.Environment.Remove("CONNECTOR_TEST_TOKEN") | Out-Null
 
+  # 不依赖父进程的当前目录（.NET 用的是 Environment.CurrentDirectory，
+  # 它与 PowerShell 的 Get-Location 并不同步）。
+  $start.WorkingDirectory = $Root
+
+  # CI 上出现过「Root 正确但子进程收到别的路径」，本机无法复现，
+  # 因此把真正传出去的内容打出来。
+  Write-Host "Installer     = $Installer"
+  Write-Host "InstallerType = $($Installer.GetType().FullName)"
+  Write-Host "InstallerOnDisk = $(Test-Path -LiteralPath $Installer)"
+  Write-Host "ArgumentList  = $($start.ArgumentList -join ' | ')"
+  Write-Host "WorkingDir    = $($start.WorkingDirectory)"
+
   $process = [Diagnostics.Process]::Start($start)
   $stdoutTask = $process.StandardOutput.ReadToEndAsync()
   $stderrTask = $process.StandardError.ReadToEndAsync()
