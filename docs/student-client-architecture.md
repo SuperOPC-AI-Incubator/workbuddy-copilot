@@ -157,6 +157,16 @@ WebSocket 客户端、REST 调用、回执账本、去重窗口、重连退避�
 - 并发：限流，避免 45 个学员同时上报时把 LLM 配额打满
 - 失败：诊断失败**不得**影响该轮对话本身的落库；记录可观测的失败计数，不重试到死
 - 幂等：同一 `event_id` 只产出一条诊断；重复 ingest（duplicate）不重复生成
+- **每个 event 只有一条 diagnosis**（数据模型约束下的裁决）：`timeline_items` 上
+  `(source_event_id, event_ordinal)` 唯一且 ordinal 被 CHECK 限制在 0..2，ingest 已占用
+  prompt→0、reply→1、客户端可选 diagnosis→2。因此服务端诊断写 ordinal `2`，靠既有唯一
+  索引保证幂等；**若该 event 已带客户端 diagnosis，则跳过服务端诊断**，客户端那条即为
+  该 event 唯一的诊断。
+  - 这在实际部署里不是妥协：我们自己的 hook 从不发 diagnosis（只组装 prompt+reply），
+    所以 ordinal 2 永远空着，服务端诊断总会生成。会带客户端 diagnosis 的是 MCP 与
+    Skill 路径，本期都不发布
+  - 产品上「一轮两条诊断」对导师是噪音而非收益，因此不为此改数据模型
+  - ingest 的同步响应里 diagnosis 的 item id **仍为 `null`** —— 响应只描述同步写入的内容
 - 成本可控：可配置开关与采样率 —— 不是每轮都必须诊断，密集操作时可降频
 
 ## 分工与依赖
