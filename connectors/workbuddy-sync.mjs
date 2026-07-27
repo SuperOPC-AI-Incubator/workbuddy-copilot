@@ -1,15 +1,29 @@
 #!/usr/bin/env node
 
-import { createHash, randomUUID as systemRandomUUID } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  randomUUID as systemRandomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { realpathSync } from "node:fs";
 import { chmod, link, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { createConnection, createServer as createNetServer } from "node:net";
 import { homedir, platform } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-const CONNECTOR_VERSION = "1.0.0";
+import { deriveEventId } from "./workbuddy-event-id.mjs";
+import {
+  buildTurnEvent,
+  parseTranscriptTail,
+  readSessionCwd,
+  readSessionTitle,
+} from "./workbuddy-transcript.mjs";
+
+export const CONNECTOR_VERSION = "1.0.0";
 const USER_AGENT = `SuperBrainCopilot-WorkBuddy/${CONNECTOR_VERSION}`;
 const EVENT_MAX_BYTES = 200_000;
 const DEFAULT_RESPONSE_MAX_BYTES = 256 * 1024;
@@ -25,6 +39,23 @@ export const LIVE_PID_GRACE_MS = Math.min(
   Math.max(MIN_LIVE_PID_GRACE_MS, DEFAULT_LOCK_STALE_MS * 5),
 );
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** CLI flags that take no value. */
+const BOOLEAN_OPTIONS = new Set(["--token-stdin", "--no-send", "--dry-run"]);
+
+/** Backfill window is a hard ceiling: mentors only ever see the last 7 days. */
+const IMPORT_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
+const IMPORT_DEFAULT_WINDOW = "7d";
+const IMPORT_MAX_FILE_BYTES = 8 * 1_024 * 1_024;
+const IMPORT_DEFAULT_THROTTLE_MS = 300;
+const IMPORT_MAX_THROTTLE_MS = 60_000;
+const FATAL_IMPORT_CODES = new Set([
+  "NOT_CONFIGURED",
+  "INVALID_CONFIG",
+  "CREDENTIAL_INVALID",
+  "INVALID_API_URL",
+  "INSECURE_API_URL",
+]);
 
 export class ConnectorError extends Error {
   constructor(code, message, details = {}) {
@@ -1052,23 +1083,33 @@ export function createWorkbuddyConnector(options = {}) {
     for (const [id, entry] of Object.entries(candidate.messages)) {
       if (
         !UUID_PATTERN.test(id) ||
-        !exactKeys(entry, [
-          "id",
-          "session_id",
-          "text",
-          "author_username",
-          "created_at",
-          "rendered_at",
-          "acked_at",
-        ]) ||
+        !exactKeys(
+          entry,
+          ["id", "session_id", "text", "author_username", "created_at", "rendered_at", "acked_at"],
+          ["shell_displayed_at"],
+        ) ||
         entry.id !== id ||
         !UUID_PATTERN.test(entry.session_id) ||
         typeof entry.text !== "string" ||
         !isIsoDate(entry.created_at) ||
         !isIsoDate(entry.rendered_at) ||
-        !(entry.acked_at === null || isIsoDate(entry.acked_at))
+        !(entry.acked_at === null || isIsoDate(entry.acked_at)) ||
+        !(
+          entry.shell_displayed_at === undefined ||
+          entry.shell_displayed_at === null ||
+          isIsoDate(entry.shell_displayed_at)
+        )
       ) {
         throw new ConnectorError("INVALID_RENDER_LEDGER", "Render ledger entry is invalid");
+      }
+      // Before IPC, rendered_at was the only local display lifecycle marker.
+      // Preserve old acknowledged entries as shown; old unacknowledged entries
+      // intentionally become pending again (at-least-once beats a lost message).
+      if (entry.shell_displayed_at === undefined) {
+        candidate.messages[id] = {
+          ...entry,
+          shell_displayed_at: entry.acked_at ?? null,
+        };
       }
     }
     return candidate;
@@ -1100,6 +1141,7 @@ export function createWorkbuddyConnector(options = {}) {
         author_username: message.author_username,
         created_at: message.created_at,
         rendered_at: new Date(now()).toISOString(),
+        shell_displayed_at: null,
         acked_at: null,
       };
       ledger.messages[message.id] = entry;
@@ -1184,6 +1226,50 @@ export function createWorkbuddyConnector(options = {}) {
     );
   }
 
+  async function pendingMessages() {
+    await ensureLayout(paths);
+    const ledger = await readRenderLedger();
+    return Object.values(ledger.messages)
+      .filter((entry) => entry.shell_displayed_at === null)
+      .sort((first, second) => first.created_at.localeCompare(second.created_at));
+  }
+
+  async function markMessagesDisplayed(messageIds) {
+    const ids = normalizeMessageIds(messageIds);
+    await ensureLayout(paths);
+    return withLock(ledgerLockPath, lockDependencies, async (assertLockHealthy) => {
+      const ledger = await readRenderLedger();
+      for (const id of ids) {
+        const entry = ledger.messages[id];
+        if (!entry || entry.id !== id || !entry.rendered_at) {
+          throw new ConnectorError("MESSAGE_NOT_RENDERED", "Message has not been rendered");
+        }
+      }
+      const displayedAt = new Date(now()).toISOString();
+      let changed = false;
+      for (const id of ids) {
+        const entry = ledger.messages[id];
+        if (entry.shell_displayed_at !== null) continue;
+        ledger.messages[id] = { ...entry, shell_displayed_at: displayedAt };
+        changed = true;
+      }
+      if (changed) {
+        await assertLockHealthy();
+        await writeRenderLedger(ledger);
+      }
+      return { accepted: ids };
+    });
+  }
+
+  async function pendingAcknowledgements() {
+    await ensureLayout(paths);
+    const ledger = await readRenderLedger();
+    return Object.values(ledger.messages)
+      .filter((entry) => entry.shell_displayed_at !== null && entry.acked_at === null)
+      .map((entry) => entry.id)
+      .sort();
+  }
+
   async function status() {
     await ensureLayout(paths);
     let config = null;
@@ -1236,9 +1322,887 @@ export function createWorkbuddyConnector(options = {}) {
     flush,
     fetchMessages,
     acknowledge,
+    pendingMessages,
+    markMessagesDisplayed,
+    pendingAcknowledgements,
     status,
     testConnection,
   };
+}
+
+const IPC_PROTOCOL_VERSION = 1;
+// The complete hello/status/event schema is intentionally provisional until a
+// real shell exists; keep this minimal surface synchronized with that shell.
+const IPC_CAPABILITIES = ["status", "messages.pending", "messages.displayed", "subscribe"];
+const IPC_EVENTS = ["message.new", "status.changed", "agent.shutdown"];
+const DEFAULT_IPC_POLL_INTERVAL_MS = 30_000;
+const DEFAULT_IPC_ACK_RETRY_MS = 1_000;
+const MAX_IPC_ACK_RETRY_MS = 60_000;
+const IPC_CAPABILITY_TOKEN_FILE = "ipc-capability.token";
+const IPC_CAPABILITY_TOKEN_BYTES = 32;
+const MAX_IPC_LINE_BYTES = 128 * 1024;
+
+function defaultIpcEndpoint(stateDirectory) {
+  if (platform() === "win32") {
+    const identifier = createHash("sha256").update(stateDirectory).digest("hex").slice(0, 24);
+    return `\\\\.\\pipe\\superbrain-copilot-${identifier}`;
+  }
+  return join(stateDirectory, "agent.ipc");
+}
+
+function ipcError(code, message) {
+  return new ConnectorError(code, message);
+}
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function publicIpcError(error) {
+  if (error instanceof ConnectorError) {
+    return { code: error.code, message: error.message };
+  }
+  return { code: "IPC_ERROR", message: "IPC request failed" };
+}
+
+function publicIpcStatus(status, connectionState, recentError, pollIntervalMs) {
+  const queue = isPlainObject(status?.queue) ? status.queue : {};
+  const delivery = isPlainObject(status?.delivery) ? status.delivery : {};
+  const count = (value) => (Number.isInteger(value) && value >= 0 ? value : 0);
+  return {
+    configured: status?.configured === true,
+    queue: {
+      pending: count(queue.pending),
+      claimed: count(queue.claimed),
+      quarantined: count(queue.quarantined),
+    },
+    delivery: {
+      rendered: count(delivery.rendered),
+      acknowledged: count(delivery.acknowledged),
+      awaiting_ack: count(delivery.awaiting_ack),
+    },
+    connection: { state: connectionState },
+    // Provisional field name; finalize the full status schema with the shell.
+    poll_interval_ms: pollIntervalMs,
+    recent_error: recentError,
+  };
+}
+
+function capabilityTokenMatches(expectedToken, presentedToken) {
+  const expected = Buffer.from(expectedToken, "utf8");
+  const received = Buffer.alloc(expected.length);
+  const receivedLength =
+    typeof presentedToken === "string" ? Buffer.byteLength(presentedToken) : -1;
+  if (typeof presentedToken === "string") {
+    Buffer.from(presentedToken, "utf8").copy(received, 0, 0, expected.length);
+  }
+  const equal = timingSafeEqual(expected, received);
+  return receivedLength === expected.length && equal;
+}
+
+function sendIpcJson(socket, value) {
+  if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(value)}\n`);
+}
+
+async function endpointHasLiveServer(endpoint) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(endpoint);
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      callback(value);
+    };
+    socket.once("connect", () => finish(resolve, true));
+    socket.once("error", (error) => {
+      if (["ECONNREFUSED", "ENOENT", "ECONNRESET"].includes(error?.code)) {
+        finish(resolve, false);
+        return;
+      }
+      finish(reject, error);
+    });
+    socket.setTimeout(1_000, () =>
+      finish(reject, ipcError("IPC_ENDPOINT_PROBE_TIMEOUT", "IPC endpoint probe timed out")),
+    );
+  });
+}
+
+async function prepareIpcEndpoint(endpoint) {
+  if (platform() === "win32") return;
+  let metadata;
+  try {
+    metadata = await stat(endpoint);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!metadata.isSocket()) {
+    throw ipcError("IPC_ENDPOINT_UNSAFE", "IPC endpoint exists but is not a socket");
+  }
+  if (await endpointHasLiveServer(endpoint)) {
+    throw ipcError("IPC_ENDPOINT_IN_USE", "IPC endpoint is already served by another agent");
+  }
+  await rm(endpoint);
+}
+
+function listenIpcServer(server, endpoint) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen({ path: endpoint, readableAll: false, writableAll: false });
+  });
+}
+
+function closeIpcServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error?.code === "ERR_SERVER_NOT_RUNNING") {
+        resolve();
+        return;
+      }
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function createIpcLockDependencies() {
+  return {
+    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now: Date.now,
+    randomUUID: systemRandomUUID,
+    staleMs: DEFAULT_LOCK_STALE_MS,
+    livePidGraceMs: LIVE_PID_GRACE_MS,
+    attempts: DEFAULT_LOCK_ATTEMPTS,
+    isProcessAlive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return error?.code === "EPERM";
+      }
+    },
+    fsyncDirectoryImpl: fsyncDirectory,
+    beforeLockRelease: async () => undefined,
+    setIntervalImpl: setInterval,
+    clearIntervalImpl: clearInterval,
+  };
+}
+
+/**
+ * Start the private local IPC endpoint used by display-only WorkBuddy shells.
+ * The shell never receives connector credentials and never invokes network
+ * operations directly; this service remains the sole owner of delivery state.
+ */
+export async function startWorkbuddyIpcServer(options = {}) {
+  const connector = options.connector ?? createWorkbuddyConnector();
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_IPC_POLL_INTERVAL_MS;
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs < 100) {
+    throw ipcError("INVALID_IPC_POLL_INTERVAL", "IPC poll interval must be at least 100ms");
+  }
+  const ackRetryDelayMs = options.ackRetryDelayMs ?? DEFAULT_IPC_ACK_RETRY_MS;
+  if (!Number.isFinite(ackRetryDelayMs) || ackRetryDelayMs < 100) {
+    throw ipcError(
+      "INVALID_IPC_ACK_RETRY",
+      "IPC acknowledgement retry delay must be at least 100ms",
+    );
+  }
+
+  // This both creates the connector's private state layout and obtains a safe
+  // status projection without making a network request.
+  await connector.status();
+  const privateStateDirectory = resolve(connector.paths.root);
+  const endpoint =
+    platform() === "win32"
+      ? (options.endpoint ?? defaultIpcEndpoint(privateStateDirectory))
+      : resolve(options.endpoint ?? defaultIpcEndpoint(privateStateDirectory));
+  if (platform() !== "win32" && dirname(endpoint) !== privateStateDirectory) {
+    throw ipcError(
+      "IPC_ENDPOINT_OUTSIDE_STATE_DIR",
+      "IPC endpoint must be directly inside the connector private state directory",
+    );
+  }
+  const capabilityTokenPath = join(privateStateDirectory, IPC_CAPABILITY_TOKEN_FILE);
+  // This token is intentionally per-agent-run. Its file inherits the already
+  // private state directory boundary; it is not a cloud credential.
+  const capabilityToken = randomBytes(IPC_CAPABILITY_TOKEN_BYTES).toString("base64url");
+  const connections = new Map();
+  const acknowledgementByMessageId = new Map();
+  const activeAcknowledgements = new Set();
+  const announcedMessageIds = new Set();
+  let connectionState = "idle";
+  let recentError = null;
+  let lastStatus = null;
+  let polling = false;
+  let activePoll = null;
+  let shuttingDown = false;
+  let closePromise = null;
+
+  const listener = createNetServer((socket) => {
+    const connection = {
+      authenticated: false,
+      hello: false,
+      subscribed: false,
+      buffer: "",
+      requests: Promise.resolve(),
+    };
+    connections.set(socket, connection);
+    socket.setEncoding("utf8");
+    socket.on("close", () => connections.delete(socket));
+    socket.on("error", () => undefined);
+    socket.on("data", (chunk) => {
+      connection.buffer += chunk;
+      if (Buffer.byteLength(connection.buffer, "utf8") > MAX_IPC_LINE_BYTES) {
+        if (!connection.authenticated) {
+          socket.destroy();
+          return;
+        }
+        sendIpcJson(socket, {
+          id: null,
+          ok: false,
+          error: { code: "REQUEST_TOO_LARGE", message: "IPC request exceeds the line limit" },
+        });
+        socket.end();
+        return;
+      }
+      for (;;) {
+        const newline = connection.buffer.indexOf("\n");
+        if (newline < 0) return;
+        const raw = connection.buffer.slice(0, newline);
+        connection.buffer = connection.buffer.slice(newline + 1);
+        if (!raw.trim()) continue;
+        connection.requests = connection.requests
+          .then(() => handleIpcRequest(socket, connection, raw))
+          .catch(() => socket.destroy());
+      }
+    });
+  });
+
+  function broadcast(event, data, subscribersOnly = true) {
+    for (const [socket, connection] of connections) {
+      if (!connection.hello || (subscribersOnly && !connection.subscribed)) continue;
+      sendIpcJson(socket, { event, data });
+    }
+  }
+
+  async function currentStatus() {
+    return publicIpcStatus(await connector.status(), connectionState, recentError, pollIntervalMs);
+  }
+
+  async function publishStatusIfChanged() {
+    const status = await currentStatus();
+    const serialized = JSON.stringify(status);
+    if (serialized !== lastStatus) {
+      lastStatus = serialized;
+      broadcast("status.changed", status);
+    }
+    return status;
+  }
+
+  function acknowledgementRetryDelay(attempt) {
+    return Math.min(MAX_IPC_ACK_RETRY_MS, ackRetryDelayMs * 2 ** attempt);
+  }
+
+  function scheduleAcknowledgement(id) {
+    if (shuttingDown || acknowledgementByMessageId.has(id)) return;
+    const acknowledgement = { attempt: 0, retryTimer: null, task: null };
+    acknowledgementByMessageId.set(id, acknowledgement);
+
+    const attempt = () => {
+      if (shuttingDown || acknowledgementByMessageId.get(id) !== acknowledgement) return;
+      acknowledgement.retryTimer = null;
+      const task = Promise.resolve().then(() => connector.acknowledge([id]));
+      acknowledgement.task = task;
+      activeAcknowledgements.add(task);
+      void task.then(
+        async () => {
+          activeAcknowledgements.delete(task);
+          if (acknowledgementByMessageId.get(id) !== acknowledgement) return;
+          acknowledgementByMessageId.delete(id);
+          announcedMessageIds.delete(id);
+          connectionState = "online";
+          recentError = null;
+          try {
+            await publishStatusIfChanged();
+          } catch (error) {
+            connectionState = "error";
+            recentError = publicIpcError(error);
+          }
+        },
+        async (error) => {
+          activeAcknowledgements.delete(task);
+          if (acknowledgementByMessageId.get(id) !== acknowledgement) return;
+          connectionState = "error";
+          recentError = publicIpcError(error);
+          try {
+            await publishStatusIfChanged();
+          } catch {
+            // The acknowledgement retry remains scheduled even if status cannot be read.
+          }
+          if (shuttingDown) {
+            acknowledgementByMessageId.delete(id);
+            return;
+          }
+          acknowledgement.retryTimer = setTimeout(
+            attempt,
+            acknowledgementRetryDelay(acknowledgement.attempt),
+          );
+          acknowledgement.retryTimer.unref?.();
+          acknowledgement.attempt += 1;
+        },
+      );
+    };
+    attempt();
+  }
+
+  async function resumePendingAcknowledgements() {
+    try {
+      const pending = await connector.pendingAcknowledgements();
+      for (const id of pending) scheduleAcknowledgement(id);
+    } catch (error) {
+      connectionState = "error";
+      recentError = publicIpcError(error);
+      try {
+        await publishStatusIfChanged();
+      } catch {
+        // The state directory can still be inspected even if status is unavailable.
+      }
+    }
+  }
+
+  async function pollMentorMessages() {
+    if (polling || shuttingDown) return;
+    polling = true;
+    try {
+      const delivery = await connector.fetchMessages({});
+      connectionState = "online";
+      recentError = null;
+      const pendingIds = new Set((await connector.pendingMessages()).map((message) => message.id));
+      for (const message of delivery.messages) {
+        if (!pendingIds.has(message.id) || announcedMessageIds.has(message.id)) continue;
+        announcedMessageIds.add(message.id);
+        broadcast("message.new", { message });
+      }
+    } catch (error) {
+      connectionState = "error";
+      recentError = publicIpcError(error);
+    } finally {
+      polling = false;
+      try {
+        await publishStatusIfChanged();
+      } catch (error) {
+        connectionState = "error";
+        recentError = publicIpcError(error);
+      }
+    }
+  }
+
+  function runPoll() {
+    if (shuttingDown || activePoll) return activePoll;
+    const poll = pollMentorMessages();
+    activePoll = poll;
+    void poll.finally(() => {
+      if (activePoll === poll) activePoll = null;
+    });
+    return poll;
+  }
+
+  async function handleIpcRequest(socket, connection, raw) {
+    let request;
+    try {
+      request = JSON.parse(raw);
+    } catch {
+      if (!connection.authenticated) {
+        socket.destroy();
+        return;
+      }
+      sendIpcJson(socket, {
+        id: null,
+        ok: false,
+        error: { code: "INVALID_REQUEST", message: "IPC request must be JSON" },
+      });
+      return;
+    }
+    if (
+      !isPlainObject(request) ||
+      typeof request.id !== "string" ||
+      typeof request.op !== "string"
+    ) {
+      if (!connection.authenticated) {
+        socket.destroy();
+        return;
+      }
+      sendIpcJson(socket, {
+        id: isPlainObject(request) && typeof request.id === "string" ? request.id : null,
+        ok: false,
+        error: { code: "INVALID_REQUEST", message: "IPC request requires string id and op" },
+      });
+      return;
+    }
+
+    try {
+      // Provisional hello fields; finalize the complete schema with the shell.
+      if (!connection.authenticated) {
+        if (!capabilityTokenMatches(capabilityToken, request.params?.capability_token)) {
+          socket.destroy();
+          return;
+        }
+        if (request.op !== "hello") {
+          throw ipcError("HELLO_REQUIRED", "Send hello before any other IPC operation");
+        }
+        connection.authenticated = true;
+      }
+      if (!connection.hello && request.op !== "hello") {
+        throw ipcError("HELLO_REQUIRED", "Send hello before any other IPC operation");
+      }
+      let result;
+      switch (request.op) {
+        case "hello": {
+          const protocolVersion = request.params?.protocol_version;
+          if (protocolVersion !== IPC_PROTOCOL_VERSION) {
+            throw ipcError(
+              "INCOMPATIBLE_PROTOCOL",
+              `IPC agent supports protocol version ${IPC_PROTOCOL_VERSION}`,
+            );
+          }
+          connection.hello = true;
+          result = {
+            protocol_version: IPC_PROTOCOL_VERSION,
+            agent_version: CONNECTOR_VERSION,
+            capabilities: IPC_CAPABILITIES,
+          };
+          break;
+        }
+        case "status":
+          result = await publishStatusIfChanged();
+          break;
+        case "messages.pending":
+          result = { messages: await connector.pendingMessages() };
+          break;
+        case "messages.displayed": {
+          const messageIds = request.params?.message_ids;
+          if (!Array.isArray(messageIds)) {
+            throw ipcError("INVALID_MESSAGE_IDS", "messages.displayed requires message_ids");
+          }
+          result = await connector.markMessagesDisplayed(messageIds);
+          for (const id of result.accepted) scheduleAcknowledgement(id);
+          break;
+        }
+        case "subscribe":
+          connection.subscribed = true;
+          result = { events: IPC_EVENTS };
+          break;
+        default:
+          throw ipcError("UNKNOWN_OP", `Unknown IPC operation: ${request.op}`);
+      }
+      sendIpcJson(socket, { id: request.id, ok: true, result });
+    } catch (error) {
+      sendIpcJson(socket, { id: request.id, ok: false, error: publicIpcError(error) });
+    }
+  }
+
+  try {
+    await withLock(
+      join(privateStateDirectory, ".ipc-start.lock"),
+      createIpcLockDependencies(),
+      async (assertLockHealthy) => {
+        await prepareIpcEndpoint(endpoint);
+        await assertLockHealthy();
+        await listenIpcServer(listener, endpoint);
+        await assertLockHealthy();
+        await atomicWrite(capabilityTokenPath, `${capabilityToken}\n`);
+        if (platform() !== "win32") await chmod(endpoint, 0o600);
+      },
+    );
+  } catch (error) {
+    if (listener.listening) await closeIpcServer(listener);
+    if (error?.code === "EADDRINUSE") {
+      throw ipcError("IPC_ENDPOINT_IN_USE", "IPC endpoint is already served by another agent");
+    }
+    throw error;
+  }
+
+  const pollTimer = setInterval(() => {
+    void runPoll();
+  }, pollIntervalMs);
+  void resumePendingAcknowledgements();
+
+  return {
+    endpoint,
+    capabilityTokenPath,
+    async close() {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        clearInterval(pollTimer);
+        broadcast("agent.shutdown", { reason: "shutdown" }, false);
+        for (const acknowledgement of acknowledgementByMessageId.values()) {
+          if (acknowledgement.retryTimer) clearTimeout(acknowledgement.retryTimer);
+        }
+        acknowledgementByMessageId.clear();
+        await Promise.allSettled([...activeAcknowledgements]);
+        for (const socket of connections.keys()) socket.end();
+        await activePoll;
+        await closeIpcServer(listener);
+      })();
+      return closePromise;
+    },
+  };
+}
+
+/** `7d` / `12h` → milliseconds. Anything wider than 7 days is refused outright. */
+export function parseSinceWindow(value) {
+  const raw = typeof value === "string" && value.trim() ? value.trim() : IMPORT_DEFAULT_WINDOW;
+  const match = /^(\d{1,5})([dh])$/.exec(raw);
+  if (!match) {
+    throw new ConnectorError("INVALID_ARGUMENTS", "--since must look like 7d or 12h");
+  }
+  const amount = Number(match[1]);
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new ConnectorError("INVALID_ARGUMENTS", "--since must be a positive amount");
+  }
+  const milliseconds = amount * (match[2] === "d" ? 86_400_000 : 3_600_000);
+  if (milliseconds > IMPORT_MAX_WINDOW_MS) {
+    throw new ConnectorError(
+      "SINCE_WINDOW_TOO_LARGE",
+      "--since cannot exceed 7d; the import window is a hard ceiling",
+    );
+  }
+  return { milliseconds, label: raw };
+}
+
+function parseThrottleMs(value) {
+  if (value === undefined) return IMPORT_DEFAULT_THROTTLE_MS;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > IMPORT_MAX_THROTTLE_MS) {
+    throw new ConnectorError("INVALID_ARGUMENTS", "--throttle-ms must be between 0 and 60000");
+  }
+  return Math.floor(parsed);
+}
+
+async function listSessionFiles(projectsDir) {
+  let entries;
+  try {
+    entries = await readdir(projectsDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new ConnectorError("PROJECTS_DIR_MISSING", "WorkBuddy projects directory is missing");
+    }
+    throw error;
+  }
+  const files = [];
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      let inner;
+      try {
+        inner = await readdir(join(projectsDir, entry.name));
+      } catch {
+        continue;
+      }
+      for (const name of inner) {
+        if (name.endsWith(".jsonl")) files.push(join(projectsDir, entry.name, name));
+      }
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      files.push(join(projectsDir, entry.name));
+    }
+  }
+  return files;
+}
+
+async function collectImportCandidates(projectsDir, windowMs, nowMs) {
+  const files = await listSessionFiles(projectsDir);
+  const candidates = [];
+  let excluded = 0;
+  for (const path of files) {
+    let metadata;
+    try {
+      metadata = await stat(path);
+    } catch {
+      continue;
+    }
+    if (!metadata.isFile()) continue;
+    if (nowMs - metadata.mtimeMs > windowMs) {
+      excluded += 1;
+      continue;
+    }
+    // The filename stem is the WorkBuddy session id, which is exactly what the
+    // Stop hook reports as source_session_key. That is what makes the two paths
+    // converge on the same event ids.
+    candidates.push({
+      path,
+      sessionId: basename(path, ".jsonl"),
+      mtimeMs: metadata.mtimeMs,
+      size: metadata.size,
+    });
+  }
+  candidates.sort(
+    (left, right) => left.mtimeMs - right.mtimeMs || (left.path < right.path ? -1 : 1),
+  );
+  return { candidates, excluded, scanned: files.length };
+}
+
+async function readSessionBody(path, size) {
+  if (size <= IMPORT_MAX_FILE_BYTES) {
+    return { body: await readFile(path), omittedBytes: 0 };
+  }
+  const handle = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(IMPORT_MAX_FILE_BYTES);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      IMPORT_MAX_FILE_BYTES,
+      size - IMPORT_MAX_FILE_BYTES,
+    );
+    return {
+      body: buffer.subarray(0, bytesRead),
+      omittedBytes: Math.max(0, size - bytesRead),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** A hard backfill window needs a trustworthy, serializable user timestamp. */
+function classifyImportTimestamp(userTimestamp, windowStartMs, nowMs) {
+  if (userTimestamp === null || userTimestamp === undefined) return "missing";
+  if (
+    typeof userTimestamp !== "number" ||
+    !Number.isFinite(userTimestamp) ||
+    userTimestamp <= 0 ||
+    !Number.isFinite(new Date(userTimestamp).getTime())
+  ) {
+    return "invalid";
+  }
+  if (userTimestamp < windowStartMs || userTimestamp > nowMs) return "outside";
+  return "inside";
+}
+
+function defaultProjectsDirectory() {
+  const workbuddyHome = process.env.WORKBUDDY_HOME;
+  const root =
+    typeof workbuddyHome === "string" && workbuddyHome.trim()
+      ? workbuddyHome
+      : join(homedir(), ".workbuddy");
+  return join(root, "projects");
+}
+
+/**
+ * Backfill recent WorkBuddy sessions into the outbox and ship them one at a time.
+ *
+ * Reuses the connector's existing durability layer (validate → atomic enqueue →
+ * flush) so nothing about ordering, claiming or retry behaviour changes; import
+ * only decides *what* to enqueue and *how fast* to drain.
+ */
+async function importSessions(connector, parsed, { stderr, now = Date.now } = {}) {
+  const projectsDir = parsed.projectsDir || defaultProjectsDirectory();
+  const window = parseSinceWindow(parsed.since);
+  const throttleMs = parseThrottleMs(parsed.throttleMs);
+  const dryRun = parsed.dryRun === true;
+  const importStartedAt = now();
+  const windowStart = importStartedAt - window.milliseconds;
+  const sleep = (milliseconds) =>
+    milliseconds > 0
+      ? new Promise((resolve) => setTimeout(resolve, milliseconds))
+      : Promise.resolve();
+
+  const { candidates, excluded, scanned } = await collectImportCandidates(
+    projectsDir,
+    window.milliseconds,
+    importStartedAt,
+  );
+
+  // Never truncate silently: a mentor must know the view is partial.
+  stderr(
+    `workbuddy-import: scanned ${scanned} session file(s) under ${projectsDir}; ` +
+      `${candidates.length} inside the ${window.label} window, ` +
+      `excluded_sessions=${excluded} older than ${window.label}`,
+  );
+
+  const summary = {
+    ok: true,
+    dryRun,
+    projectsDir,
+    window: window.label,
+    scannedSessions: scanned,
+    eligibleSessions: candidates.length,
+    excludedSessions: excluded,
+    sessionsWithTurns: 0,
+    turns: 0,
+    truncatedTurns: 0,
+    skippedTurns: 0,
+    partialSessions: 0,
+    truncatedSessions: 0,
+    omittedBytes: 0,
+    excludedTurns: 0,
+    missingTimestampTurns: 0,
+    invalidTimestampTurns: 0,
+    queued: 0,
+    sent: 0,
+    duplicate: 0,
+    retained: 0,
+    quarantined: 0,
+    failedTurns: 0,
+  };
+
+  for (const candidate of candidates) {
+    let sessionBody;
+    try {
+      sessionBody = await readSessionBody(candidate.path, candidate.size);
+    } catch (error) {
+      stderr(
+        `workbuddy-import: unreadable session ${candidate.sessionId} (${error?.code ?? "ERROR"})`,
+      );
+      continue;
+    }
+    if (sessionBody.omittedBytes > 0) {
+      summary.partialSessions += 1;
+      summary.truncatedSessions += 1;
+      summary.omittedBytes += sessionBody.omittedBytes;
+      stderr(
+        `workbuddy-import: session ${candidate.sessionId} truncated to the final ` +
+          `${IMPORT_MAX_FILE_BYTES} bytes; omitted_bytes=${sessionBody.omittedBytes}`,
+      );
+    }
+    const parsedTranscript = parseTranscriptTail(sessionBody.body);
+    if (
+      sessionBody.omittedBytes === 0 &&
+      (parsedTranscript.droppedLeadingPartial || parsedTranscript.droppedTrailingPartial)
+    ) {
+      summary.partialSessions += 1;
+    }
+
+    const inWindowTurns = [];
+    for (const turn of parsedTranscript.turns) {
+      const timestampState = classifyImportTimestamp(
+        turn.userTimestamp,
+        windowStart,
+        importStartedAt,
+      );
+      if (timestampState === "inside") {
+        inWindowTurns.push(turn);
+        continue;
+      }
+      if (timestampState === "missing") {
+        summary.missingTimestampTurns += 1;
+        stderr(
+          `workbuddy-import: skipped turn ${candidate.sessionId}/${turn.userMessageId} ` +
+            "(MISSING_USER_TIMESTAMP)",
+        );
+      } else if (timestampState === "invalid") {
+        summary.invalidTimestampTurns += 1;
+        stderr(
+          `workbuddy-import: skipped turn ${candidate.sessionId}/${turn.userMessageId} ` +
+            "(INVALID_USER_TIMESTAMP)",
+        );
+      } else {
+        summary.excludedTurns += 1;
+      }
+    }
+    if (inWindowTurns.length === 0) continue;
+    summary.sessionsWithTurns += 1;
+
+    // Deliberately NOT parsedTranscript.sessionTitle: import sees the whole file
+    // while the Stop hook only sees a bounded window. Both must resolve the title
+    // from the same bounded view or they build conflicting payloads for one
+    // event_id, and the 409 path quarantines one of them.
+    let sessionTitle = null;
+    try {
+      sessionTitle = await readSessionTitle({ open }, candidate.path);
+    } catch (error) {
+      stderr(
+        `workbuddy-import: title lookup failed for ${candidate.sessionId} (${error?.code ?? "ERROR"})`,
+      );
+    }
+
+    // Canonical cwd is deliberately read from the first transcript message,
+    // never from a recent tail or hook stdin: it is part of the idempotent event
+    // payload and must not change as the session evolves.
+    let cwd = null;
+    try {
+      cwd = await readSessionCwd({ open }, candidate.path);
+    } catch (error) {
+      stderr(
+        `workbuddy-import: cwd lookup failed for ${candidate.sessionId} (${error?.code ?? "ERROR"})`,
+      );
+    }
+
+    for (const turn of inWindowTurns) {
+      const eventId = deriveEventId(candidate.sessionId, turn.userMessageId);
+      const event = buildTurnEvent({
+        turn,
+        sourceSessionKey: candidate.sessionId,
+        sessionTitle,
+        cwd,
+        eventId,
+      });
+      if (!event) {
+        summary.skippedTurns += 1;
+        continue;
+      }
+      summary.turns += 1;
+      // Oversized turns are cut with a visible marker, never dropped.
+      if (
+        turn.promptText.length > event.prompt.length ||
+        turn.replyText.length > event.reply.length
+      ) {
+        summary.truncatedTurns += 1;
+      }
+      if (dryRun) continue;
+
+      try {
+        const queued = await connector.enqueueEvent(event);
+        if (queued.queued) summary.queued += 1;
+        const flushed = await connector.flush();
+        summary.sent += flushed.sent ?? 0;
+        summary.duplicate += flushed.duplicate ?? 0;
+        summary.retained += flushed.retained ?? 0;
+        summary.quarantined += flushed.quarantined ?? 0;
+      } catch (error) {
+        const code = error instanceof ConnectorError ? error.code : "CONNECTOR_ERROR";
+        if (FATAL_IMPORT_CODES.has(code)) throw error;
+        summary.failedTurns += 1;
+        stderr(`workbuddy-import: turn ${eventId} failed (${code})`);
+      }
+      await sleep(throttleMs);
+    }
+  }
+
+  if (summary.truncatedTurns > 0) {
+    stderr(
+      `workbuddy-import: truncated_turns=${summary.truncatedTurns} (content cut, not dropped)`,
+    );
+  }
+  if (summary.excludedTurns > 0) {
+    stderr(
+      `workbuddy-import: excluded_turns=${summary.excludedTurns} outside the ${window.label} window`,
+    );
+  }
+  if (summary.missingTimestampTurns > 0) {
+    stderr(
+      `workbuddy-import: missing_timestamp_turns=${summary.missingTimestampTurns} ` +
+        "(excluded to preserve the hard time window)",
+    );
+  }
+  if (summary.invalidTimestampTurns > 0) {
+    stderr(`workbuddy-import: invalid_timestamp_turns=${summary.invalidTimestampTurns}`);
+  }
+  return summary;
 }
 
 function parseOptions(args, allowed) {
@@ -1248,8 +2212,8 @@ function parseOptions(args, allowed) {
     if (!argument.startsWith("--") || !allowed.has(argument)) {
       throw new ConnectorError("INVALID_ARGUMENTS", "Command arguments are invalid");
     }
-    if (argument === "--token-stdin") {
-      result.tokenStdin = true;
+    if (BOOLEAN_OPTIONS.has(argument)) {
+      result[argument.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = true;
       continue;
     }
     const value = args[index + 1];
@@ -1339,11 +2303,31 @@ export async function runCli(argv, options = {}) {
         break;
       }
       case "sync": {
-        const parsed = parseOptions(args, new Set(["--event-file"]));
+        const parsed = parseOptions(args, new Set(["--event-file", "--no-send"]));
         if (!parsed.eventFile) {
           throw new ConnectorError("INVALID_ARGUMENTS", "--event-file is required");
         }
+        if (parsed.noSend) {
+          // Validate + atomically enqueue only. The hook runs this path so it
+          // never touches the network on WorkBuddy's critical path.
+          const event = validateWorkbuddyEvent(
+            safeJsonParse(
+              await readBoundedFile(parsed.eventFile, EVENT_MAX_BYTES),
+              "INVALID_EVENT",
+            ),
+          );
+          result = { ...(await connector.enqueueEvent(event)), sent: 0, noSend: true };
+          break;
+        }
         result = await connector.syncEventFile(parsed.eventFile);
+        break;
+      }
+      case "import": {
+        const parsed = parseOptions(
+          args,
+          new Set(["--projects-dir", "--since", "--throttle-ms", "--dry-run"]),
+        );
+        result = await importSessions(connector, parsed, { stderr });
         break;
       }
       case "fetch": {
@@ -1373,10 +2357,37 @@ export async function runCli(argv, options = {}) {
         }
         result = await connector.testConnection();
         break;
+      case "ipc": {
+        const parsed = parseOptions(args, new Set(["--poll-interval-ms"]));
+        const pollIntervalMs =
+          parsed.pollIntervalMs === undefined ? undefined : Number(parsed.pollIntervalMs);
+        const ipcServer = await startWorkbuddyIpcServer({ connector, pollIntervalMs });
+        stdout(
+          JSON.stringify({
+            ok: true,
+            endpoint: ipcServer.endpoint,
+            capability_token_path: ipcServer.capabilityTokenPath,
+          }),
+        );
+        await new Promise((resolve) => {
+          let stopping = false;
+          const stop = async () => {
+            if (stopping) return;
+            stopping = true;
+            process.off("SIGINT", stop);
+            process.off("SIGTERM", stop);
+            await ipcServer.close();
+            resolve();
+          };
+          process.once("SIGINT", stop);
+          process.once("SIGTERM", stop);
+        });
+        return 0;
+      }
       default:
         throw new ConnectorError(
           "INVALID_COMMAND",
-          "Use configure, sync, fetch, ack, flush, status, or test-connection",
+          "Use configure, sync, import, fetch, ack, flush, status, test-connection, or ipc",
         );
     }
     stdout(JSON.stringify(result));

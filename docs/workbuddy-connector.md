@@ -1,8 +1,9 @@
 # WorkBuddy fallback connector
 
 MCP is the preferred WorkBuddy integration. The fallback connector exists for
-clients that cannot connect to MCP and preserves the same reliable ingest and
-mentor-message acknowledgement boundaries on macOS, Linux, and Windows.
+clients that cannot connect to MCP and provides reliable upstream turn ingest
+on macOS, Linux, and Windows. Returning mentor messages to WorkBuddy is not
+part of the default installation in this release.
 
 ## Install
 
@@ -11,8 +12,11 @@ token-free install commands for:
 
 - macOS and Linux: `install-macos.sh`
 - Windows: `install-windows.ps1`
-- the Node.js 22 stdlib-only runtime: `workbuddy-sync.mjs`
-- a token-free WorkBuddy `SKILL.md`
+- runtime modules: `workbuddy-sync.mjs`, `workbuddy-transcript.mjs`,
+  `workbuddy-event-id.mjs`, and `workbuddy-hook.mjs`
+- `detect-runtime.sh`, which must be beside the POSIX installer
+- a token-free WorkBuddy `SKILL.md` template, required only when downstream is
+  explicitly enabled
 
 The installer prompts for the one-time credential without echoing it. It sends
 the credential through standard input to `configure --token-stdin`; it never
@@ -21,7 +25,18 @@ render ledger. POSIX uses a `0700` state directory and `0600` configuration.
 Windows removes inherited ACL entries and grants only the current user access.
 Neither installer requires administrator privileges.
 
-The installer creates the actual WorkBuddy user Skill at:
+The connector needs a Node.js 22+ runtime, but students do not need Node.js on
+`PATH`. The installers select, in order: an explicit `WORKBUDDY_NODE` override,
+WorkBuddy's bundled Electron binary (run with `ELECTRON_RUN_AS_NODE=1`), a
+Node binary WorkBuddy previously downloaded, and finally `PATH` Node as a
+fallback. They embed the selected absolute runtime path in the generated
+wrappers, so WorkBuddy and background work do not subsequently depend on
+`PATH`.
+
+The downstream WorkBuddy Skill is **not installed by default**. This release's
+default path only sends upstream turns. Use `--with-downstream` on macOS/Linux
+or `-WithDownstream` on Windows to create the Skill for an explicitly requested
+downstream setup. When that switch is used, the user-Skill is created at:
 
 - macOS/Linux: `$HOME/.workbuddy/skills/superbrain-sync/SKILL.md`
 - Windows: `%USERPROFILE%\.workbuddy\skills\superbrain-sync\SKILL.md`
@@ -31,10 +46,15 @@ It also creates a current-user connector command:
 - macOS/Linux: `$HOME/.local/bin/workbuddy-sync`
 - Windows: `%LOCALAPPDATA%\SuperBrainCopilot\app\workbuddy-sync.ps1`
 
-These wrappers embed the install-time absolute Node.js and connector paths, so
-WorkBuddy and background schedules do not depend on `PATH`. The generated Skill
-calls the absolute wrapper and contains no credential. Restart WorkBuddy after
-installing it.
+When installed, the generated Skill calls the absolute wrapper and contains no
+credential. Restart WorkBuddy after an installation that changes its settings.
+
+Normal installation also registers the upstream wrapper in the `Stop` event of
+`~/.workbuddy/settings.json` (the equivalent path under `%USERPROFILE%` on
+Windows). It merges the connector entry without removing the student's existing
+hooks and replaces its own prior entry during an upgrade. Before changing the
+file, it creates an atomic, timestamped backup of the existing settings file.
+This upstream hook is independent of the optional downstream Skill.
 
 On POSIX, the wrapper and scheduled runner also embed and export the
 install-time `XDG_STATE_HOME`. Clearing or changing that environment variable
@@ -44,17 +64,22 @@ cron to another configuration directory. Every install or upgrade reapplies
 configuration. Windows likewise reapplies the checked current-user-only ACL to
 an existing configuration and aborts if Windows rejects the ACL replacement.
 
-The user-Skill location above is consistent with the WorkBuddy examples in
+The optional user-Skill location above is consistent with the WorkBuddy examples in
 [腾讯云开发者社区：Skills 目录与 SKILL.md 示例](https://cloud.tencent.com/developer/article/2693324)
 and
 [腾讯云开发者社区：WorkBuddy Skills 使用说明](https://cloud.tencent.com/developer/article/2672691).
-WorkBuddy versions and distribution channels may scan Skills differently. If
-the Skill does not appear after restart, use **技能栏 → 导入** and select the
-installed `SKILL.md`; the setup page shows this fallback explicitly.
+WorkBuddy versions and distribution channels may scan Skills differently. If an
+explicitly installed Skill does not appear after restart, use **技能栏 → 导入**
+and select the installed `SKILL.md`; the setup page shows this fallback
+explicitly.
 
-Install and upgrade are idempotent. Uninstall removes the scheduled task and
-program files but deliberately preserves the private state directory, queued
-events, render ledger, and configuration for recovery.
+Install and upgrade are idempotent. They also start one background
+`workbuddy-sync import --since 7d` pass unless `--no-import`/`-NoImport` was
+specified. Import is hard-capped to the most recent seven days and can safely
+be re-run with the same command; progress is written to `logs/import.log`.
+Uninstall removes the scheduled task, registered Stop hook, and program files
+but deliberately preserves the private state directory, queued events, render
+ledger, and configuration for recovery.
 
 ## Commands
 
@@ -62,10 +87,10 @@ events, render ledger, and configuration for recovery.
 workbuddy-sync configure --api-url https://copilot.example.com
 workbuddy-sync sync --event-file /path/to/turn.json
 workbuddy-sync flush
-workbuddy-sync fetch [--session-id UUID]
-workbuddy-sync ack --message-ids UUID[,UUID...]
+workbuddy-sync import --since 7d
 workbuddy-sync status
 workbuddy-sync test-connection
+workbuddy-sync ipc [--poll-interval-ms 30000]
 ```
 
 Use the absolute wrapper path shown above when invoking these commands from
@@ -76,6 +101,26 @@ be on `PATH`.
 `--token-stdin` explicitly enables standard-input credential delivery.
 There is intentionally no credential command-line option or environment
 variable.
+
+`ipc` is a long-running local agent endpoint for a future display shell. It
+prints its private endpoint and capability-token file path as JSON once it is
+ready and exits cleanly on `SIGINT` or `SIGTERM`; it does not open a TCP port.
+`--poll-interval-ms` is optional (the default is currently 30000); a shell must
+read the active value from IPC `status`, not assume that default.
+
+On POSIX the endpoint is a `0600` Unix domain socket. On Windows it is a named
+pipe. Every shell must include the per-agent-run capability token from
+`ipc-capability.token` in `hello`; the service silently closes an unauthenticated
+connection and never returns the token or the configured cloud credential. The
+token file is inside the existing current-user-only state directory (POSIX 0700;
+Windows installer ACL), so it is the Windows access boundary without introducing
+a compiled native addon. Socket/pipe permissions remain defence in depth.
+
+`messages.displayed` means the agent has durably accepted the shell's display
+claim, not that its upstream acknowledgement has finished. The connector retries
+the latter in the background and resumes outstanding acknowledgements after a
+restart. `agent.shutdown` is best effort only: a shell must also treat the IPC
+connection closing as the authoritative offline signal.
 
 ## State and crash recovery
 
@@ -127,31 +172,14 @@ timeouts, and three retries with exponential backoff and jitter. Redirects are
 never followed, so the authorization header cannot cross an origin boundary.
 Plain HTTP is accepted only through an injected localhost-only test setting.
 
-## Mentor-message delivery boundary
-
-`fetch` requests at most three pending messages and validates the complete
-response. Each exact message is atomically persisted with its ID, session,
-original text, creation timestamp, and local render timestamp before it is
-printed. Mentor text is untrusted quotation data and is never executed.
-
-Fetching does not acknowledge. `ack` accepts only a unique, exact set of IDs
-that exist in the unified render ledger. IDs already acknowledged locally are
-successful no-ops. For a mixed request, the connector validates every ID,
-releases the ledger lease, performs the idempotent server acknowledgement with
-no local lock held, then reacquires the short acknowledgement and ledger
-leases. It reloads the latest ledger, merges acknowledgement timestamps, and
-rewrites it once. A mentor message fetched during a slow acknowledgement is
-therefore preserved. A network failure makes no local acknowledgement change.
-A crash after server success but before the atomic ledger rewrite safely
-retries the server call and fills the local acknowledgement state.
-
 The installers create a user-level launchd, cron, or Windows Scheduled Task
-that periodically runs `flush` and `fetch` using embedded absolute paths. The
-runner writes timestamps, command results, and failures to
-`logs/scheduled-sync.log` under the private state directory. Scheduled `fetch`
-discards the message body and never acknowledges it. The WorkBuddy Skill still
-performs the visible fetch and acknowledges only at the next completed
-user-turn boundary.
+that periodically runs the embedded connector paths. The runner records
+timestamps, command results, and failures in `logs/scheduled-sync.log` under
+the private state directory. It may run the connector's low-level `fetch`
+operation, but discards message bodies and never acknowledges them; that does
+not return mentor messages to WorkBuddy. The default installation intentionally
+creates no downstream Skill. Treat `--with-downstream`/`-WithDownstream` as an
+explicit opt-in rather than a default mentor-message delivery path.
 
 ## Verification and platform limits
 
@@ -162,7 +190,8 @@ redirect and response-size rejection, exact Unicode preservation,
 render-before-ack ordering, repeated and partial acknowledgement, failed-ack
 recovery, expired and active leases, secret absence, and POSIX installer
 idempotency/permissions. The POSIX test also executes the generated absolute
-wrapper and checks the installed WorkBuddy Skill and file permissions.
+wrapper, checks the optional WorkBuddy Skill when downstream is enabled, and
+checks that the default installation leaves it absent.
 
 The Windows installer has static contract coverage on macOS. Its actual
 PowerShell execution remains a Windows CI responsibility when `pwsh` is not

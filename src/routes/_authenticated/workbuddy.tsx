@@ -137,12 +137,19 @@ function WorkBuddySetup() {
   };
   const posixInstallCommand = `work_dir="$(mktemp -d)" && cd "$work_dir" && \\
 curl -fsSLO "${apiOrigin}/downloads/workbuddy-sync.mjs" && \\
+curl -fsSLO "${apiOrigin}/downloads/workbuddy-transcript.mjs" && \\
+curl -fsSLO "${apiOrigin}/downloads/workbuddy-event-id.mjs" && \\
+curl -fsSLO "${apiOrigin}/downloads/workbuddy-hook.mjs" && \\
+curl -fsSLO "${apiOrigin}/downloads/detect-runtime.sh" && \\
 curl -fsSLO "${apiOrigin}/downloads/SKILL.md" && \\
 curl -fsSLO "${apiOrigin}/downloads/install-macos.sh" && \\
 chmod 700 install-macos.sh && ./install-macos.sh --api-url "${apiOrigin}"`;
   const windowsInstallCommand = `$workDir = Join-Path ([IO.Path]::GetTempPath()) ("superbrain-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $workDir | Out-Null
 Invoke-WebRequest "${apiOrigin}/downloads/workbuddy-sync.mjs" -OutFile (Join-Path $workDir "workbuddy-sync.mjs")
+Invoke-WebRequest "${apiOrigin}/downloads/workbuddy-transcript.mjs" -OutFile (Join-Path $workDir "workbuddy-transcript.mjs")
+Invoke-WebRequest "${apiOrigin}/downloads/workbuddy-event-id.mjs" -OutFile (Join-Path $workDir "workbuddy-event-id.mjs")
+Invoke-WebRequest "${apiOrigin}/downloads/workbuddy-hook.mjs" -OutFile (Join-Path $workDir "workbuddy-hook.mjs")
 Invoke-WebRequest "${apiOrigin}/downloads/SKILL.md" -OutFile (Join-Path $workDir "SKILL.md")
 Invoke-WebRequest "${apiOrigin}/downloads/install-windows.ps1" -OutFile (Join-Path $workDir "install-windows.ps1")
 & (Join-Path $workDir "install-windows.ps1") -ApiUrl "${apiOrigin}"`;
@@ -414,6 +421,27 @@ Invoke-WebRequest "${apiOrigin}/downloads/install-windows.ps1" -OutFile (Join-Pa
             >
               {copied === "command" ? "命令已复制" : "复制安装命令"}
             </button>
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            手动下载时，下面这些文件必须和安装器放在同一个目录：连接器和上行 hook
+            在启动时就会加载它们，缺一个就会安装失败。
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {[
+              "workbuddy-transcript.mjs",
+              "workbuddy-event-id.mjs",
+              "workbuddy-hook.mjs",
+              ...(platformTab === "windows" ? [] : ["detect-runtime.sh"]),
+            ].map((asset) => (
+              <a
+                key={asset}
+                href={`/downloads/${asset}`}
+                download
+                className="rounded-md border px-2 py-1 font-mono text-xs"
+              >
+                {asset}
+              </a>
+            ))}
           </div>
           <pre className="mt-3 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed">
             {installCommand}
