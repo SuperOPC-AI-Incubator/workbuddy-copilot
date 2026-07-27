@@ -79,6 +79,12 @@ type IngestRouteDependencies = {
     studentId: string;
     turn: ReliableWorkbuddyTurn;
   }): Promise<WorkbuddyIngestResult>;
+  enqueueDiagnosis?(input: {
+    eventId: string;
+    sessionId: string;
+    prompt: string;
+    reply: string;
+  }): void;
   maximumBodyBytes?: number;
 };
 
@@ -159,6 +165,22 @@ export function createWorkbuddyIngestPostHandler(dependencies: IngestRouteDepend
 
     try {
       const result = await dependencies.ingestTurn({ studentId, turn });
+      // Accurate scope: only events without a client diagnosis receive the
+      // asynchronous server diagnosis at event ordinal 2.
+      if (!result.duplicate && result.diagnosis_item_id === null) {
+        try {
+          dependencies.enqueueDiagnosis?.({
+            eventId: result.event_id,
+            sessionId: result.session_id,
+            prompt: turn.prompt,
+            reply: turn.reply,
+          });
+        } catch {
+          console.warn("[WorkBuddy ingest] diagnosis enqueue failed", {
+            code: "WORKBUDDY_DIAGNOSIS_ENQUEUE_FAILED",
+          });
+        }
+      }
       return json({
         ok: true,
         event_id: result.event_id,
@@ -195,10 +217,12 @@ async function post(request: Request): Promise<Response> {
       { supabaseAdmin },
       { createSupabaseWorkbuddyCredentialGateway, resolveWorkbuddyCredential },
       { createSupabaseWorkbuddyIngestGateway, ingestWorkbuddyTurn },
+      { enqueueWorkbuddyTurnDiagnosis },
     ] = await Promise.all([
       import("@/integrations/supabase/client.server"),
       import("@/lib/workbuddy/credentials.server"),
       import("@/lib/workbuddy/events.server"),
+      import("@/lib/workbuddy/diagnosis.server"),
     ]);
 
     const credentialGateway = createSupabaseWorkbuddyCredentialGateway(supabaseAdmin);
@@ -207,6 +231,7 @@ async function post(request: Request): Promise<Response> {
       resolveCredential: (presentedToken) =>
         resolveWorkbuddyCredential(presentedToken, { gateway: credentialGateway }),
       ingestTurn: (input) => ingestWorkbuddyTurn(input, { gateway: ingestGateway }),
+      enqueueDiagnosis: enqueueWorkbuddyTurnDiagnosis,
     })(request);
   } catch {
     console.error("[WorkBuddy ingest] server dependency initialization failed");
