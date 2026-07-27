@@ -811,6 +811,58 @@ describe("import and the Stop hook agree on identity", () => {
     ).toEqual(importedLast);
   });
 
+  test("the hook and import produce deeply equal masked payloads for the same credentials", async () => {
+    const directory = await workspace();
+    const projectsDir = join(directory, "projects");
+    const session = "099f9849-1385-4b4b-9eb3-8edca841b117";
+    const promptSecret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const replySecret = "github_pat_11AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const transcriptPath = await writeSession(
+      projectsDir,
+      "masked",
+      session,
+      sessionBody(session, "/Users/camp/WorkBuddy/masked", "脱敏会话", [
+        {
+          userId: "u1",
+          prompt: `请检查 ${promptSecret}`,
+          assistantId: "a1",
+          reply: `不要泄漏 ${replySecret}`,
+        },
+      ]),
+    );
+    const hookState = join(directory, "hook-state");
+    const hookResult = await runHook({
+      stdinText: JSON.stringify({
+        hook_event_name: "Stop",
+        session_id: session,
+        transcript_path: transcriptPath,
+        cwd: "/Users/camp/WorkBuddy/masked",
+      }),
+      env: {
+        ...process.env,
+        XDG_STATE_HOME: hookState,
+        LOCALAPPDATA: hookState,
+        WORKBUDDY_CONNECTOR_PATH: connectorPath,
+      },
+      temporaryDirectory: directory,
+      log: () => undefined,
+    });
+    const { connector, sent } = await configuredConnector(join(directory, "import-state"));
+    const result = await runImport(connector, [
+      "--projects-dir",
+      projectsDir,
+      "--throttle-ms",
+      "0",
+    ]);
+    const imported = sent.find((entry) => entry.body.event_id === hookResult.eventId)?.body;
+
+    expect(hookResult.ok).toBe(true);
+    expect(result.code).toBe(0);
+    expect(imported).toEqual(hookResult.event);
+    expect(JSON.stringify(imported)).not.toContain(promptSecret.slice("sk-proj-".length + 4, -4));
+    expect(JSON.stringify(imported)).not.toContain(replySecret.slice("github_pat_".length + 4, -4));
+  });
+
   test("agree on a long session whose title sits far outside the hook's tail", async () => {
     const directory = await workspace();
     const projectsDir = join(directory, "projects");

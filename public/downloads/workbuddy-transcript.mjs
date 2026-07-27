@@ -18,7 +18,7 @@
  * absolute paths and secrets — they are never extracted, not even as placeholders.
  */
 
-import { truncateForContract } from "./workbuddy-event-id.mjs";
+import { redactCredentialsForContract, truncateForContract } from "./workbuddy-event-id.mjs";
 import { StringDecoder } from "node:string_decoder";
 
 /** Content item types that hold plain conversation text. Strict whitelist. */
@@ -240,8 +240,20 @@ export function parseTranscriptTail(input, options = {}) {
  * between live sync and backfill idempotent).
  */
 export function buildTurnEvent({ turn, sourceSessionKey, sessionTitle, cwd, eventId }) {
-  const prompt = truncateForContract(turn.promptText, PROMPT_MAX_LENGTH);
-  const reply = truncateForContract(turn.replyText, REPLY_MAX_LENGTH);
+  // Redact before applying the server length contract: truncating first could
+  // retain a credential's middle while cutting off the evidence that it was hidden.
+  const maskedPrompt = redactCredentialsForContract(turn.promptText);
+  const maskedReply = redactCredentialsForContract(turn.replyText);
+  const prompt = truncateForContract(
+    maskedPrompt.text,
+    PROMPT_MAX_LENGTH,
+    maskedPrompt.protectedRanges,
+  );
+  const reply = truncateForContract(
+    maskedReply.text,
+    REPLY_MAX_LENGTH,
+    maskedReply.protectedRanges,
+  );
   if (!prompt.text.trim() || !reply.text.trim()) return null;
 
   const key = truncateForContract(sourceSessionKey, SOURCE_SESSION_KEY_MAX_LENGTH);
