@@ -12,6 +12,7 @@ export class ConnectorError extends Error {
 }
 
 export const LIVE_PID_GRACE_MS: number;
+export const CONNECTOR_VERSION: string;
 
 export type WorkbuddyConnector = {
   apiUrl: string | null;
@@ -26,6 +27,20 @@ export type WorkbuddyConnector = {
     next_cursor: string | null;
   }>;
   acknowledge(messageIds: string[]): Promise<unknown>;
+  pendingMessages(): Promise<
+    Array<{
+      id: string;
+      session_id: string;
+      text: string;
+      author_username: string | null;
+      created_at: string;
+      rendered_at: string;
+      shell_displayed_at: string | null;
+      acked_at: string | null;
+    }>
+  >;
+  markMessagesDisplayed(messageIds: string[]): Promise<{ accepted: string[] }>;
+  pendingAcknowledgements(): Promise<string[]>;
   status(): Promise<unknown>;
   testConnection(): Promise<unknown>;
 };
@@ -54,6 +69,19 @@ export function createWorkbuddyConnector(options?: {
   setIntervalImpl?: typeof setInterval;
   clearIntervalImpl?: typeof clearInterval;
 }): WorkbuddyConnector;
+
+export type WorkbuddyIpcServer = {
+  endpoint: string;
+  capabilityTokenPath: string;
+  close(): Promise<void>;
+};
+
+export function startWorkbuddyIpcServer(options?: {
+  connector?: WorkbuddyConnector;
+  endpoint?: string;
+  pollIntervalMs?: number;
+  ackRetryDelayMs?: number;
+}): Promise<WorkbuddyIpcServer>;
 
 export function runCli(
   argv: string[],
