@@ -9,8 +9,15 @@ import { getAIUserMessage } from "@/lib/ai-user-messages";
 import { createComposeRevisionController } from "@/lib/draft-composition";
 import { createDraftSubmissionController } from "@/lib/draft-submission";
 import { sendMentorMessage } from "@/lib/mentor-messages.functions";
+import { getMentorAlertKind, type MentorAlertKind } from "@/lib/mentor-alerts";
 import { createRealtimePollingController } from "@/lib/realtime-polling";
 import { createMonotonicRefreshController } from "@/lib/timeline-refresh";
+import {
+  createBrowserNotificationPort,
+  createStudentBrowserNotificationController,
+  isStudentBrowserNotificationItem,
+  type StudentBrowserNotificationStatus,
+} from "@/lib/student-browser-notifications";
 import {
   describeTimelineDelivery,
   pendingMentorDeliveryCount,
@@ -82,6 +89,8 @@ function MentorDesk() {
   const [aiBusy, setAiBusy] = useState(false);
   const [mentorSendBusy, setMentorSendBusy] = useState(false);
   const [composeError, setComposeError] = useState<string | null>(null);
+  const [notificationStatus, setNotificationStatus] =
+    useState<StudentBrowserNotificationStatus | null>(null);
   const askAIFn = useServerFn(askAI);
   const draftFn = useServerFn(draftMentorTip);
   const sendMentorMessageFn = useServerFn(sendMentorMessage);
@@ -107,6 +116,17 @@ function MentorDesk() {
   const mentorCardElementsRef = useRef(
     new Map<string, { item: TimelineItem; element: HTMLElement }>(),
   );
+  const timelineViewportRef = useRef<HTMLDivElement | null>(null);
+  const ownSessionIdsRef = useRef(new Set<string>());
+  const ownSessionsReadyRef = useRef(false);
+  const pendingStudentNotificationItemsRef = useRef<TimelineItem[]>([]);
+  const deferredStudentNotificationItemsRef = useRef(
+    new Map<string, { item: TimelineItem; timer: number }>(),
+  );
+  const visibleStudentNotificationItemIdsRef = useRef(new Set<string>());
+  const studentNotificationControllerRef = useRef<ReturnType<
+    typeof createStudentBrowserNotificationController
+  > | null>(null);
 
   if (!mentorSubmissionControllerRef.current) {
     mentorSubmissionControllerRef.current = createDraftSubmissionController({
@@ -143,6 +163,48 @@ function MentorDesk() {
     [],
   );
 
+  const deliverStudentNotification = useCallback((item: TimelineItem) => {
+    studentNotificationControllerRef.current?.handleTimelineInsert({
+      id: item.id,
+      sessionId: item.session_id,
+      kind: item.kind,
+      text: item.text,
+      severity: item.severity,
+    });
+  }, []);
+
+  const resolveDeferredStudentNotification = useCallback(
+    (item: TimelineItem, element: HTMLElement | null) => {
+      const deferred = deferredStudentNotificationItemsRef.current.get(item.id);
+      if (!deferred || !element) return;
+      window.clearTimeout(deferred.timer);
+      deferredStudentNotificationItemsRef.current.delete(item.id);
+
+      const rect = element.getBoundingClientRect();
+      const viewportRect = timelineViewportRef.current?.getBoundingClientRect();
+      const viewportTop = Math.max(0, viewportRect?.top ?? 0);
+      const viewportRight = Math.min(window.innerWidth, viewportRect?.right ?? window.innerWidth);
+      const viewportBottom = Math.min(
+        window.innerHeight,
+        viewportRect?.bottom ?? window.innerHeight,
+      );
+      const viewportLeft = Math.max(0, viewportRect?.left ?? 0);
+      const isVisible =
+        document.visibilityState === "visible" &&
+        rect.bottom >= viewportTop &&
+        rect.right >= viewportLeft &&
+        rect.top <= viewportBottom &&
+        rect.left <= viewportRight;
+      if (isVisible) {
+        visibleStudentNotificationItemIdsRef.current.add(item.id);
+      } else {
+        visibleStudentNotificationItemIdsRef.current.delete(item.id);
+      }
+      deliverStudentNotification(deferred.item);
+    },
+    [deliverStudentNotification],
+  );
+
   const registerMentorCardElement = useCallback(
     (item: TimelineItem, element: HTMLElement | null) => {
       const previous = mentorCardElementsRef.current.get(item.id);
@@ -151,15 +213,70 @@ function MentorDesk() {
         webSeenControllerRef.current?.unobserve(previous.element);
         mentorCardElementsRef.current.delete(item.id);
       }
-      if (!element) return;
+      if (!element) {
+        visibleStudentNotificationItemIdsRef.current.delete(item.id);
+        return;
+      }
       mentorCardElementsRef.current.set(item.id, { item, element });
       webSeenControllerRef.current?.observe(
         { messageId: item.id, sessionId: item.session_id, kind: item.kind },
         element,
       );
+      resolveDeferredStudentNotification(item, element);
     },
-    [],
+    [resolveDeferredStudentNotification],
   );
+
+  const registerTimelineViewportElement = useCallback((element: HTMLDivElement | null) => {
+    timelineViewportRef.current = element;
+  }, []);
+
+  const notifyStudentAboutTimelineItem = useCallback(
+    (item: TimelineItem) => {
+      if (!ownSessionsReadyRef.current) {
+        pendingStudentNotificationItemsRef.current.push(item);
+        return;
+      }
+      if (!ownSessionIdsRef.current.has(item.session_id)) return;
+      const notificationItem = {
+        id: item.id,
+        sessionId: item.session_id,
+        kind: item.kind,
+        text: item.text,
+        severity: item.severity,
+      };
+      if (
+        item.session_id === currentSessionIdRef.current &&
+        isStudentBrowserNotificationItem(notificationItem)
+      ) {
+        if (deferredStudentNotificationItemsRef.current.has(item.id)) return;
+        const timer = window.setTimeout(() => {
+          const deferred = deferredStudentNotificationItemsRef.current.get(item.id);
+          if (!deferred) return;
+          deferredStudentNotificationItemsRef.current.delete(item.id);
+          visibleStudentNotificationItemIdsRef.current.delete(item.id);
+          deliverStudentNotification(deferred.item);
+        }, 1000);
+        deferredStudentNotificationItemsRef.current.set(item.id, { item, timer });
+        resolveDeferredStudentNotification(
+          item,
+          mentorCardElementsRef.current.get(item.id)?.element ?? null,
+        );
+        return;
+      }
+      deliverStudentNotification(item);
+    },
+    [deliverStudentNotification, resolveDeferredStudentNotification],
+  );
+
+  const flushPendingStudentNotifications = useCallback(() => {
+    if (!ownSessionsReadyRef.current) return;
+    const pending = pendingStudentNotificationItemsRef.current;
+    pendingStudentNotificationItemsRef.current = [];
+    pending
+      .filter((item) => ownSessionIdsRef.current.has(item.session_id))
+      .forEach((item) => notifyStudentAboutTimelineItem(item));
+  }, [notifyStudentAboutTimelineItem]);
 
   // Tick every minute so "24h no sync" stays accurate without a full refetch.
   const [now, setNow] = useState(() => Date.now());
@@ -241,10 +358,9 @@ function MentorDesk() {
   }, []);
 
   // Mentor-wide alerts: SOS (call mentor) / error (AI severity=error) / warn (soft toast).
-  type AlertKind = "sos" | "error" | "warn";
   type MentorAlert = {
     id: string;
-    kind: AlertKind;
+    kind: MentorAlertKind;
     fromWorkBuddy: boolean;
     studentName: string;
     text: string;
@@ -269,11 +385,8 @@ function MentorDesk() {
         async (payload) => {
           const row = payload.new as TimelineItem;
           const tag = row.tag ?? "";
-          const isSos = tag.includes("呼叫导师");
-          const isError = row.kind === "diagnosis" && row.severity === "error" && !isSos;
-          const isWarn = row.kind === "diagnosis" && row.severity === "warn";
-          if (!isSos && !isError && !isWarn) return;
-          const kind: AlertKind = isSos ? "sos" : isError ? "error" : "warn";
+          const kind = getMentorAlertKind(row);
+          if (!kind) return;
           const fromWorkBuddy = tag.startsWith("WB") || tag === "WorkBuddy";
           // Look up student name via session
           const { data: sess } = await supabase
@@ -393,6 +506,53 @@ function MentorDesk() {
     dismissAlert(a.id);
   };
 
+  // Student browser notifications: Realtime RLS scopes rows to this account; the
+  // locally loaded session set is a second guard before a notification can fire.
+  // Permission is intentionally requested only by requestStudentNotificationPermission.
+  useEffect(() => {
+    studentNotificationControllerRef.current = null;
+    setNotificationStatus(null);
+    if (role !== "student") return;
+
+    const deferredStudentNotifications = deferredStudentNotificationItemsRef.current;
+    const visibleStudentNotificationItemIds = visibleStudentNotificationItemIdsRef.current;
+    const controller = createStudentBrowserNotificationController({
+      notifications: createBrowserNotificationPort(),
+      isMessageVisible: (item) => visibleStudentNotificationItemIdsRef.current.has(item.id),
+      ownsSession: (sessionId) => ownSessionIdsRef.current.has(sessionId),
+      onStatusChange: setNotificationStatus,
+    });
+    studentNotificationControllerRef.current = controller;
+    const refreshNotificationStatus = () => setNotificationStatus(controller.getStatus());
+    refreshNotificationStatus();
+
+    const ch = supabase
+      .channel("student-browser-notifications")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "timeline_items" },
+        (payload) => notifyStudentAboutTimelineItem(payload.new as TimelineItem),
+      )
+      .subscribe();
+    document.addEventListener("visibilitychange", refreshNotificationStatus);
+    return () => {
+      document.removeEventListener("visibilitychange", refreshNotificationStatus);
+      deferredStudentNotifications.forEach(({ timer }) => window.clearTimeout(timer));
+      deferredStudentNotifications.clear();
+      visibleStudentNotificationItemIds.clear();
+      if (studentNotificationControllerRef.current === controller) {
+        studentNotificationControllerRef.current = null;
+      }
+      supabase.removeChannel(ch);
+    };
+  }, [role, notifyStudentAboutTimelineItem]);
+
+  const requestStudentNotificationPermission = async () => {
+    const controller = studentNotificationControllerRef.current;
+    if (!controller) return;
+    setNotificationStatus(await controller.requestPermission());
+  };
+
   // Initial load + realtime for students
   useEffect(() => {
     let mounted = true;
@@ -438,7 +598,15 @@ function MentorDesk() {
   useEffect(() => {
     if (!currentStudentId) {
       setSessions([]);
+      if (role === "student") {
+        ownSessionIdsRef.current.clear();
+        ownSessionsReadyRef.current = false;
+      }
       return;
+    }
+    if (role === "student") {
+      ownSessionIdsRef.current.clear();
+      ownSessionsReadyRef.current = false;
     }
     let mounted = true;
     supabase
@@ -449,6 +617,11 @@ function MentorDesk() {
       .then(({ data }) => {
         if (!mounted || !data) return;
         setSessions(data as Session[]);
+        if (role === "student") {
+          ownSessionIdsRef.current = new Set(data.map((session) => session.id));
+          ownSessionsReadyRef.current = true;
+          flushPendingStudentNotifications();
+        }
         if (!currentSessionId || !data.some((s) => s.id === currentSessionId)) {
           changeCurrentSession(data[0]?.id ?? null);
         }
@@ -465,13 +638,19 @@ function MentorDesk() {
           filter: `student_id=eq.${currentStudentId}`,
         },
         (payload) => {
-          setSessions((prev) =>
-            applyChange(
+          setSessions((prev) => {
+            const next = applyChange(
               prev,
               payload,
               (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-            ),
-          );
+            );
+            if (role === "student") {
+              ownSessionIdsRef.current = new Set(next.map((session) => session.id));
+              ownSessionsReadyRef.current = true;
+              flushPendingStudentNotifications();
+            }
+            return next;
+          });
         },
       )
       .subscribe();
@@ -480,7 +659,7 @@ function MentorDesk() {
       supabase.removeChannel(ch);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentStudentId]);
+  }, [currentStudentId, role]);
 
   // Timeline for current session + realtime
   useEffect(() => {
@@ -752,6 +931,8 @@ function MentorDesk() {
         staleCount={staleStudents.length}
         role={role}
         isTeamAdmin={isTeamAdmin}
+        notificationStatus={notificationStatus}
+        onRequestNotifications={requestStudentNotificationPermission}
       />
       {role === "mentor" && staleStudents.length > 0 && (
         <div className="flex shrink-0 items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-6 py-2 text-xs text-amber-900 dark:text-amber-200">
@@ -884,6 +1065,7 @@ function MentorDesk() {
           onDraftTip={draftTip}
           onCallMentor={callMentor}
           onMentorCardElement={registerMentorCardElement}
+          onTimelineViewportElement={registerTimelineViewportElement}
         />
       </main>
     </div>
@@ -921,6 +1103,8 @@ function TopBar({
   staleCount,
   role,
   isTeamAdmin,
+  notificationStatus,
+  onRequestNotifications,
 }: {
   studentCount: number;
   activeStudent: Student | null;
@@ -930,6 +1114,8 @@ function TopBar({
   staleCount?: number;
   role?: "mentor" | "student" | null;
   isTeamAdmin?: boolean;
+  notificationStatus?: StudentBrowserNotificationStatus | null;
+  onRequestNotifications?: () => void;
 }) {
   return (
     <header
@@ -984,6 +1170,31 @@ function TopBar({
           <span style={{ color: "var(--sidebar-muted)" }} className="hidden md:inline">
             {accountLabel}
           </span>
+        )}
+        {role === "student" && (
+          <div className="flex items-center gap-2">
+            {notificationStatus && (
+              <span
+                className="max-w-72 text-[11px]"
+                style={{ color: "var(--sidebar-muted)" }}
+                title={notificationStatus.guidance}
+              >
+                {notificationStatus.state === "denied" || notificationStatus.state === "error"
+                  ? notificationStatus.guidance
+                  : `通知：${notificationStatus.label}`}
+              </span>
+            )}
+            {notificationStatus?.canRequest && onRequestNotifications && (
+              <button
+                type="button"
+                onClick={onRequestNotifications}
+                className="rounded-md border px-2.5 py-1 text-xs transition-colors"
+                style={{ borderColor: "oklch(1 0 0 / 0.15)", color: "var(--sidebar-fg)" }}
+              >
+                开启消息通知
+              </button>
+            )}
+          </div>
         )}
         {role === "student" && (
           <Link
@@ -1235,6 +1446,7 @@ function TimelinePanel({
   onDraftTip,
   onCallMentor,
   onMentorCardElement,
+  onTimelineViewportElement,
 }: {
   items: TimelineItem[];
   deliveries: Record<string, TimelineDelivery>;
@@ -1250,6 +1462,7 @@ function TimelinePanel({
   onDraftTip: () => void;
   onCallMentor: () => void;
   onMentorCardElement: (item: TimelineItem, element: HTMLElement | null) => void;
+  onTimelineViewportElement: (element: HTMLDivElement | null) => void;
 }) {
   const isStudent = role === "student";
   const mentorSubmissionText = composeText.trim();
@@ -1274,7 +1487,7 @@ function TimelinePanel({
           </p>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+      <div ref={onTimelineViewportElement} className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
         {items.length === 0 ? (
           <EmptyState text="暂无事件" />
         ) : (
@@ -1284,7 +1497,11 @@ function TimelinePanel({
                 key={item.id}
                 item={item}
                 delivery={deliveries[item.id] ?? null}
-                onCardElement={item.kind === "mentor" ? onMentorCardElement : undefined}
+                onCardElement={
+                  item.kind === "mentor" || (item.kind === "diagnosis" && item.severity === "error")
+                    ? onMentorCardElement
+                    : undefined
+                }
               />
             ))}
           </ol>
