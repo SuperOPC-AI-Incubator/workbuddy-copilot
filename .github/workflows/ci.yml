@@ -38,6 +38,8 @@ jobs:
         run: bun install --frozen-lockfile --registry=https://registry.npmjs.org
       - name: Reject stale hosted URLs and private artifact registries
         run: bun run ci:forbidden-hosts
+      - name: Reject a committed MCP manifest that no longer matches the entry
+        run: bun run ci:mcp-manifest
       - name: Run formatting, lint, types, unit tests, and production build
         run: bun run check
 

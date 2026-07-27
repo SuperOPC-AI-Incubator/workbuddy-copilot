@@ -11,7 +11,11 @@ import ackMentorMessagesTool from "./tools/ack-mentor-messages";
 
 // The OAuth issuer MUST be the direct Supabase host, not the .lovable.cloud proxy.
 // Only the project ref survives publish unchanged. Read via Vite's inlined literal.
-const projectRef = import.meta.env.VITE_SUPABASE_PROJECT_ID ?? "project-ref-unset";
+// The tracked .env defines this key with an empty value, so `??` would keep the empty
+// string and emit the unusable issuer `https://.supabase.co/auth/v1`. `||` keeps the
+// sentinel visible in unconfigured builds and in an extracted manifest; scripts/deploy.sh
+// still rejects a missing or malformed ref before a release is built.
+const projectRef = import.meta.env.VITE_SUPABASE_PROJECT_ID || "project-ref-unset";
 
 export default defineMcp({
   name: "workbuddy-copilot-mcp",
