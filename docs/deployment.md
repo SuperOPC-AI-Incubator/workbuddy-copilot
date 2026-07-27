@@ -116,10 +116,38 @@ PGSSLMODE=require
 
 Nothing is passed on the command line, so no credential appears in `ps` output.
 
-The dump requires a client at least as new as the server. The project runs
+Two host-specific details decide how the connection is configured.
+
+**The client must be at least as new as the server.** The project runs
 PostgreSQL 17 and Ubuntu 24.04 ships the 16 client, which refuses to dump a
-newer server outright, so `postgresql-client-17` must be installed from the PGDG
-repository. The script checks this before spending a run.
+newer server outright. This host is shared: a system PostgreSQL 16 serves other
+services on the same machine, so installing `postgresql-client-17` over the
+shared `libpq5` was rejected as too wide a change for a backup job. The 17
+client is unpacked into its own prefix instead, touching no packages:
+
+```bash
+dpkg -x postgresql-client-17_17.9-1.pgdg24.04+1_amd64.deb /opt/pg17
+dpkg -x libpq5_18.4-1.pgdg24.04+1_amd64.deb /opt/pg17
+```
+
+`/etc/cron.d/superbrain-copilot-ops` then points the script at that prefix:
+
+```
+PG_DUMP=/opt/pg17/usr/lib/postgresql/17/bin/pg_dump
+PG_DUMP_LIB_PATH=/opt/pg17/usr/lib/x86_64-linux-gnu
+```
+
+`PG_DUMP_LIB_PATH` is not optional dressing. Without it the 17 client resolves
+`libpq.so.5` to the system's 16.13 copy, which happens to satisfy `--version`
+but is older than the `libpq5 (>= 17.9)` the package declares. Removing
+`/opt/pg17` and those two cron lines fully reverts this.
+
+**Direct database connections need IPv6, which this host does not have.**
+`db.<project-ref>.supabase.co` publishes only an AAAA record and the server has
+no global IPv6 address, so a direct connection can never work from here. Use the
+dashboard's **Session pooler** connection (port 5432), not the transaction
+pooler on 6543: transaction pooling does not preserve the session state
+`pg_dump` relies on. The pooler user is `postgres.<project-ref>`.
 
 The dump is verified before it replaces the retained copy: a size floor plus the
 presence of `"public"."students"`, `"public"."timeline_items"` and

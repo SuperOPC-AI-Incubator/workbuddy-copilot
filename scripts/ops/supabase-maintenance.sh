@@ -23,6 +23,13 @@ BACKUP_DIR=${BACKUP_DIR:-/var/backups/superbrain-copilot}
 BACKUP_NAME=${BACKUP_NAME:-superbrain-copilot-latest.sql.gz}
 BACKUP_SCHEMAS=${BACKUP_SCHEMAS:-public auth}
 MIN_BACKUP_BYTES=${MIN_BACKUP_BYTES:-20000}
+# The dump client is configurable because the deployment host runs other services against a
+# system PostgreSQL 16, so a matching 17 client is unpacked into its own prefix rather than
+# installed over the shared one. PG_DUMP_LIB_PATH points at that prefix's libpq: the client
+# declares `libpq5 (>= 17.9)` and the system copy is older, so resolving it explicitly is a
+# decision, not luck.
+PG_DUMP=${PG_DUMP:-pg_dump}
+PG_DUMP_LIB_PATH=${PG_DUMP_LIB_PATH:-}
 # pg_dump runs with --quote-all-identifiers, so these appear verbatim in a healthy dump.
 DEFAULT_MARKERS='"public"."students" "public"."timeline_items" "auth"."users"'
 REQUIRED_MARKERS=${REQUIRED_MARKERS:-$DEFAULT_MARKERS}
@@ -78,15 +85,22 @@ keepalive() {
   log "keepalive ok (HTTP $status)"
 }
 
+pg_dump_env() {
+  if [[ -n "$PG_DUMP_LIB_PATH" ]]; then
+    printf 'LD_LIBRARY_PATH=%s' "$PG_DUMP_LIB_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  fi
+}
+
 require_matching_pg_dump() {
-  command -v pg_dump >/dev/null 2>&1 || die "pg_dump is not installed"
+  command -v "$PG_DUMP" >/dev/null 2>&1 || [[ -x "$PG_DUMP" ]] ||
+    die "$PG_DUMP is not an executable pg_dump"
   local version major
-  version=$(pg_dump --version | grep -oE '[0-9]+(\.[0-9]+)*' | head -1)
+  version=$(env $(pg_dump_env) "$PG_DUMP" --version | grep -oE '[0-9]+(\.[0-9]+)*' | head -1)
   major=${version%%.*}
   # pg_dump refuses to dump a newer server outright, so check before spending a run on it.
   # The tracked project runs PostgreSQL 17; Ubuntu 24.04 ships the 16 client by default.
   [[ -n "$major" && "$major" -ge 17 ]] ||
-    die "pg_dump $version is older than the PostgreSQL 17 server; install postgresql-client-17"
+    die "$PG_DUMP is version $version, older than the PostgreSQL 17 server; set PG_DUMP to a 17+ client"
 }
 
 require_backup_env() {
@@ -129,8 +143,11 @@ backup() {
     [[ -n "${PGHOST:-}" && -n "${PGUSER:-}" && -n "${PGPASSWORD:-}" && -n "${PGDATABASE:-}" ]] ||
       exit 64
     export PGSSLMODE="${PGSSLMODE:-require}"
+    if [[ -n "$PG_DUMP_LIB_PATH" ]]; then
+      export LD_LIBRARY_PATH="$PG_DUMP_LIB_PATH${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
     # No connection string in argv: pg_dump reads PG* from this subshell's environment.
-    pg_dump \
+    "$PG_DUMP" \
       "${schema_args[@]}" \
       --no-owner \
       --no-privileges \
