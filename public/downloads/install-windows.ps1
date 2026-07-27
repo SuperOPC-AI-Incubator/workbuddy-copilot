@@ -24,6 +24,7 @@ $SettingsHelper = Join-Path $InstallRoot "register-workbuddy-hook.mjs"
 $SkillTemplate = Join-Path $InstallRoot "SKILL.template.md"
 $Wrapper = Join-Path $InstallRoot "workbuddy-sync.ps1"
 $Runner = Join-Path $InstallRoot "scheduled-sync.ps1"
+$ImportRunner = Join-Path $InstallRoot "initial-import.ps1"
 $LogRoot = Join-Path $StateRoot "logs"
 $RunnerLog = Join-Path $LogRoot "scheduled-sync.log"
 $HookLog = Join-Path $LogRoot "hook.log"
@@ -582,7 +583,7 @@ if ($Action -eq "Uninstall") {
     }
   }
   $removable = @($Connector, $HookEntry, $HookWrapper, $SettingsHelper, $SkillTemplate, $Wrapper,
-    $Runner, $InstalledSkill)
+    $Runner, $ImportRunner, $InstalledSkill)
   foreach ($module in @($ConnectorModules) + @($HookModules)) {
     $removable += (Join-Path $InstallRoot $module)
   }
@@ -739,6 +740,36 @@ if (`$LASTEXITCODE -eq 0) {
 exit `$status
 "@ | Set-Content -LiteralPath $Runner -Encoding UTF8
 
+# 不通过 `-Command` 字符串转发后台补传：Start-Process 会把 ArgumentList 数组重新拼成
+# 一条命令行，含空格的 profile 路径与重定向符在子 PowerShell 中可能丢失参数边界。
+# 将运行时、入口和日志路径写入受 ACL 保护的脚本，再用 -File 启动，和 macOS 直接
+# 后台执行 wrapper 的路径等价。
+$importNodeLiteral = "'" + $runtimePath.Replace("'", "''") + "'"
+$importConnectorLiteral = "'" + $Connector.Replace("'", "''") + "'"
+$importLogLiteral = "'" + $ImportLog.Replace("'", "''") + "'"
+@"
+`$ErrorActionPreference = "Continue"
+$electronPreamble`$nodeBinary = $importNodeLiteral
+`$connector = $importConnectorLiteral
+`$importLog = $importLogLiteral
+"`$([DateTime]::UtcNow.ToString("o")) initial import start" | Add-Content -LiteralPath `$importLog
+if (-not (Test-Path -LiteralPath `$nodeBinary)) {
+  "`$([DateTime]::UtcNow.ToString("o")) initial import runtime missing: `$nodeBinary" |
+    Add-Content -LiteralPath `$importLog
+  exit 1
+}
+& `$nodeBinary `$connector import --since 7d *>> `$importLog
+`$status = `$LASTEXITCODE
+if (`$status -eq 0) {
+  "`$([DateTime]::UtcNow.ToString("o")) initial import ok" | Add-Content -LiteralPath `$importLog
+}
+else {
+  "`$([DateTime]::UtcNow.ToString("o")) initial import failed" | Add-Content -LiteralPath `$importLog
+}
+exit `$status
+"@ | Set-Content -LiteralPath $ImportRunner -Encoding UTF8
+Set-PrivateFileAcl -Path $ImportRunner
+
 if (-not $NoHook) {
   # hook 包装脚本必须是 bash 脚本：Windows 上 CodeBuddy 强制用 Git Bash 执行 hook 命令。
   $hookNodePath = ConvertTo-BashSingleQuoted ($runtimePath.Replace("\", "/"))
@@ -811,15 +842,19 @@ if (-not $NoSchedule) {
 
 # 装机时补传近 7 天历史：后台跑，不阻塞安装完成，随时可中断后重跑。
 if (-not $NoImport) {
-  $importCommand = "& '" + $Wrapper.Replace("'", "''") + "' import --since 7d " +
-    "*>> '" + $ImportLog.Replace("'", "''") + "'"
-  Start-Process `
-    -FilePath "powershell.exe" `
-    -ArgumentList @(
-      "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-      "-Command", $importCommand
-    ) `
-    -WindowStyle Hidden | Out-Null
+  $powerShellHost = (Get-Process -Id $PID).Path
+  if ([string]::IsNullOrWhiteSpace($powerShellHost)) {
+    throw "Cannot determine the current PowerShell executable for background import."
+  }
+  # Start-Process 的 ArgumentList 数组会重新拼接；此处使用一个带显式引号的参数
+  # 字符串，确保 -File 后的路径（通常含空格）作为一个实参传给子进程。
+  $importArguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ImportRunner`""
+  $importProcess = Start-Process `
+    -FilePath $powerShellHost `
+    -ArgumentList $importArguments `
+    -WorkingDirectory $InstallRoot `
+    -WindowStyle Hidden `
+    -PassThru
 }
 
 Write-Host "SuperBrain WorkBuddy connector installed for the current user."
@@ -835,7 +870,7 @@ else {
   Write-Host "Downstream skill not installed (pass -WithDownstream if you need it)."
 }
 if (-not $NoImport) {
-  Write-Host "历史补传（近 7 天）已在后台开始，不影响安装完成。"
+  Write-Host "历史补传（近 7 天）已在后台开始（PID $($importProcess.Id)），不影响安装完成。"
   Write-Host "  进度日志：$ImportLog"
   Write-Host "  需要重跑：& `"$Wrapper`" import --since 7d"
 }
