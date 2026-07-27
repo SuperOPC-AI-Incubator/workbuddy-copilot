@@ -27,18 +27,18 @@ Electron 路径这个死结可以消失。**不过官方 `tencent-pptx/bin/run-n
 
 下列记号均为本机绝对路径，后续每个“已验证事实”均以记号和行号标注。
 
-| 记号 | 绝对路径 |
-| --- | --- |
-| `PRef` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/plugins-reference.md` |
-| `Hooks` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/hooks.md` |
-| `Plugins` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/plugins.md` |
-| `Market` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/plugin-marketplaces.md` |
-| `SettingsDoc` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/settings.md` |
-| `TP` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-plugins/tencent-pptx` |
-| `WP` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-plugins/weixinpay` |
-| `Desktop` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar!/main/initialize.js`（桌面端 app.asar 内源码） |
-| `CLI` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/codebuddy.js`（压缩 bundle；行号为 bundle 逻辑行） |
-| `Conn` | `/private/tmp/claude-502/-Users-michael-projects------workbuddy-copilot/da0a7aa8-eb5c-46d4-a330-5d3159ce5398/scratchpad/wt-plugin/connectors` |
+| 记号          | 绝对路径                                                                                                                                      |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PRef`        | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/plugins-reference.md`                           |
+| `Hooks`       | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/hooks.md`                                       |
+| `Plugins`     | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/plugins.md`                                     |
+| `Market`      | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/plugin-marketplaces.md`                         |
+| `SettingsDoc` | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/web-ui/docs/en/cli/settings.md`                                    |
+| `TP`          | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-plugins/tencent-pptx`                                     |
+| `WP`          | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/resources/builtin-plugins/weixinpay`                                        |
+| `Desktop`     | `/Applications/WorkBuddy.app/Contents/Resources/app.asar!/main/initialize.js`（桌面端 app.asar 内源码）                                       |
+| `CLI`         | `/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/dist/codebuddy.js`（压缩 bundle；行号为 bundle 逻辑行）                 |
+| `Conn`        | `/private/tmp/claude-502/-Users-michael-projects------workbuddy-copilot/da0a7aa8-eb5c-46d4-a330-5d3159ce5398/scratchpad/wt-plugin/connectors` |
 
 `app.asar` 源码与 `codebuddy.js` 都是随当前 WorkBuddy 安装包交付的本机文件；后者压缩为
 少数超长行，故同时摘录原文关键片段，避免行号误读。
@@ -90,10 +90,9 @@ Electron 路径这个死结可以消失。**不过官方 `tencent-pptx/bin/run-n
 
 - manifest 将 hooks 指向 `./hooks/hooks.json`；其唯一示例 hook 是 `PreToolUse` + `Skill`，
   command 为 `"${CODEBUDDY_PLUGIN_ROOT}/bin/run-node"
-  "${CODEBUDDY_PLUGIN_ROOT}/scripts/ensure-runtime.mjs"`，timeout 120 秒。
+"${CODEBUDDY_PLUGIN_ROOT}/scripts/ensure-runtime.mjs"`，timeout 120 秒。
   【`TP/.codebuddy-plugin/plugin.json:13-14`；`TP/hooks/hooks.json:1-15`】
 - POSIX `bin/run-node` 的解析顺序是：
-
   1. 遍历**冒号**分隔的 `WORKBUDDY_EXTRA_PATHS`，取第一个可执行的 `<dir>/node`；
   2. 取 `WORKBUDDY_CONFIG_DIR`，否则 `CODEBUDDY_CONFIG_DIR`，否则 `$HOME/.workbuddy`；
      在 `binaries/node/versions` 中排除 `*.installing.*` / `*.__extract_temp__*`，按
@@ -103,6 +102,7 @@ Electron 路径这个死结可以消失。**不过官方 `tencent-pptx/bin/run-n
 
   命中后会将 Node 所在目录前置至 `PATH`，再 `exec "$NODE_BIN" "$@"`，以使 npm 的
   `#!/usr/bin/env node` shebang 可继续找到 Node。【`TP/bin/run-node:6-71`】
+
 - `scripts/ensure-runtime.mjs` 只对 `Skill`/`UseSkill` 且 skill 名为 `tencent-pptx` 工作；
   它第二次解析 Node 的优先级是 `NODE_BIN_DIR`（注释标为 WorkBuddy 注入）→
   `~/.workbuddy/binaries/node/versions/<最高版本>/bin` → PATH。它把插件携带的
@@ -194,36 +194,36 @@ token 置入插件包、hook command 字符串或 event 文件。
 下表是**文档明确的限制**；“没有 UI”是从完整 schema/component 清单的缺口得出的有限
 结论，并不声称不存在未公开 API。
 
-| 限制 | 已验证事实与证据 |
-| --- | --- |
-| 无自定义 UI/面板组件类型 | 组件清单只有 Skills、Agents、Hooks、MCP、LSP；manifest 的组件字段为 commands/agents/skills/hooks/mcpServers/outputStyles/lspServers/userConfig/channels。`channels` 只能绑定插件 MCP server 向会话注入内容，并非 UI 扩展点。【`PRef:5,296-351,479-535`】 |
-| 包内 settings 不能通用改平台设置 | 插件根 `settings.json` “Currently only agent settings are supported”；未知键静默忽略。【`PRef:534-535`；`Plugins:330-342`】 |
-| Agent 元数据受限 | `isolation` 只有 `worktree`；plugin agent 不支持 hooks、mcpServers、permissionMode frontmatter。【`PRef:18`】 |
-| hook 类型受 Desktop 限制 | 当前 Desktop 禁掉 extended plugin hooks，故本方案只可用 `command`。【`Desktop:8766-8768`；`CLI:678`】 |
-| 无法依赖插件根以外文件 | marketplace 安装会复制至 plugin cache；`../` 根外引用失效，路径必须是以 `./` 开头的相对路径。【`PRef:453-475,353-360`】 |
-| 目录扫描不是追加语义 | custom commands/agents/skills/outputStyles 替换默认目录；组件须在 plugin root，不能放入 `.codebuddy-plugin/`。【`PRef:353-360,520-535`】 |
-| 卸载可能删持久状态 | 从最后 scope 卸载时 `${CODEBUDDY_PLUGIN_DATA}` 默认被删；需 `--keep-data` 才保留。【`PRef:406-449,577-599`】 |
-| Windows hook 仍依赖 Git Bash | 插件化不会改变 Windows hook 的 shell 强制约束。【`Hooks:54-58,772-781`】 |
+| 限制                             | 已验证事实与证据                                                                                                                                                                                                                                         |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 无自定义 UI/面板组件类型         | 组件清单只有 Skills、Agents、Hooks、MCP、LSP；manifest 的组件字段为 commands/agents/skills/hooks/mcpServers/outputStyles/lspServers/userConfig/channels。`channels` 只能绑定插件 MCP server 向会话注入内容，并非 UI 扩展点。【`PRef:5,296-351,479-535`】 |
+| 包内 settings 不能通用改平台设置 | 插件根 `settings.json` “Currently only agent settings are supported”；未知键静默忽略。【`PRef:534-535`；`Plugins:330-342`】                                                                                                                              |
+| Agent 元数据受限                 | `isolation` 只有 `worktree`；plugin agent 不支持 hooks、mcpServers、permissionMode frontmatter。【`PRef:18`】                                                                                                                                            |
+| hook 类型受 Desktop 限制         | 当前 Desktop 禁掉 extended plugin hooks，故本方案只可用 `command`。【`Desktop:8766-8768`；`CLI:678`】                                                                                                                                                    |
+| 无法依赖插件根以外文件           | marketplace 安装会复制至 plugin cache；`../` 根外引用失效，路径必须是以 `./` 开头的相对路径。【`PRef:453-475,353-360`】                                                                                                                                  |
+| 目录扫描不是追加语义             | custom commands/agents/skills/outputStyles 替换默认目录；组件须在 plugin root，不能放入 `.codebuddy-plugin/`。【`PRef:353-360,520-535`】                                                                                                                 |
+| 卸载可能删持久状态               | 从最后 scope 卸载时 `${CODEBUDDY_PLUGIN_DATA}` 默认被删；需 `--keep-data` 才保留。【`PRef:406-449,577-599`】                                                                                                                                             |
+| Windows hook 仍依赖 Git Bash     | 插件化不会改变 Windows hook 的 shell 强制约束。【`Hooks:54-58,772-781`】                                                                                                                                                                                 |
 
 ## 对当前 `connectors/` 的迁移影响（推论）
 
 ### 必须保留并打包的运行时代码
 
-| 现有文件 | 处置 | 理由 |
-| --- | --- | --- |
-| `workbuddy-sync.mjs` | 保留 | durable outbox、发送、重试、flush/fetch、凭证配置与数据契约仍是业务能力。|
-| `workbuddy-hook.mjs` | 保留 | `Stop` stdin → transcript → event → 本地入队的关键路径；当前明确只处理 Stop。【`Conn/workbuddy-hook.mjs:4-12,178-241`】 |
-| `workbuddy-transcript.mjs`、`workbuddy-event-id.mjs` | 保留 | 上述 hook 和历史导入的直接依赖，保证 event id/内容一致。|
-| `*.d.mts` | 保留在源码与测试中；无需作为 Node 运行时入口 | 它们是类型声明，不是当前 `.mjs` 的执行依赖。|
-| `SKILL.md` | 视下行功能而定 | 若仍需导师回信，下沉为插件 `skills/superbrain-sync/SKILL.md`；若该功能继续不默认启用，可不随首个上行插件安装。|
+| 现有文件                                             | 处置                                         | 理由                                                                                                                    |
+| ---------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `workbuddy-sync.mjs`                                 | 保留                                         | durable outbox、发送、重试、flush/fetch、凭证配置与数据契约仍是业务能力。                                               |
+| `workbuddy-hook.mjs`                                 | 保留                                         | `Stop` stdin → transcript → event → 本地入队的关键路径；当前明确只处理 Stop。【`Conn/workbuddy-hook.mjs:4-12,178-241`】 |
+| `workbuddy-transcript.mjs`、`workbuddy-event-id.mjs` | 保留                                         | 上述 hook 和历史导入的直接依赖，保证 event id/内容一致。                                                                |
+| `*.d.mts`                                            | 保留在源码与测试中；无需作为 Node 运行时入口 | 它们是类型声明，不是当前 `.mjs` 的执行依赖。                                                                            |
+| `SKILL.md`                                           | 视下行功能而定                               | 若仍需导师回信，下沉为插件 `skills/superbrain-sync/SKILL.md`；若该功能继续不默认启用，可不随首个上行插件安装。          |
 
 ### 可淘汰的当前安装机制，但不能现在删除文件
 
-| 现有文件/机制 | 插件化后 | 删除前提 |
-| --- | --- | --- |
-| `detect-runtime.sh` | 用新的插件 runner 取代 | Windows 实机已证实 `WORKBUDDY_EXTRA_PATHS` 在 Stop hook 内可见且能定位 `node.exe`。|
+| 现有文件/机制                                                | 插件化后                                | 删除前提                                                                                                                                                                                  |
+| ------------------------------------------------------------ | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `detect-runtime.sh`                                          | 用新的插件 runner 取代                  | Windows 实机已证实 `WORKBUDDY_EXTRA_PATHS` 在 Stop hook 内可见且能定位 `node.exe`。                                                                                                       |
 | `install-macos.sh` 中的 settings helper、hook 注册、模块复制 | 平台 hook 加载与 marketplace cache 取代 | 已另行保住其 scheduler、首次历史导入、token 初始化、下行 Skill 的行为。当前脚本确实复制模块、写 wrapper、注册 Stop hook、建立 scheduler/导入。【`Conn/install-macos.sh:440-498,557-633`】 |
-| `install-windows.ps1` 中同类逻辑 | 同上 | 同时完成 Windows 兼容 runner 与 Windows scheduler/补传替代；现脚本自己也承认 Windows Electron 路径未经真机核对。【`Conn/install-windows.ps1:55-67,611-620,739-806`】 |
+| `install-windows.ps1` 中同类逻辑                             | 同上                                    | 同时完成 Windows 兼容 runner 与 Windows scheduler/补传替代；现脚本自己也承认 Windows Electron 路径未经真机核对。【`Conn/install-windows.ps1:55-67,611-620,739-806`】                      |
 
 换言之，**现在不应删除仓库中的任何 connector 文件**。第一版插件只应淘汰学员机上由
 安装器生成的文件；仓库安装器应保留到新插件完成等价验证、且旧学员迁移完毕后才考虑删。

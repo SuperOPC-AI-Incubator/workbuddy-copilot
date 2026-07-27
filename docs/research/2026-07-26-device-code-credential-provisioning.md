@@ -49,15 +49,15 @@
 
 ### `userConfig` 与 WDP 的对比
 
-| 维度 | `sensitive userConfig` | WDP 设备码 / 浏览器确认 |
-| --- | --- | --- |
-| token 不进 WorkBuddy 对话、Skill、事件文件 | 若平台承诺兑现，可解决。 | 可解决；token 从未交给 WorkBuddy 文本层。 |
-| token 不成为命令行参数 | 可解决，但前提是只读子进程环境，绝不用 substitution。 | 可解决；token 只来自 poll HTTPS response。 |
-| 本机安全存储 | 文档承诺 Keychain；不可用时回退 `~/.codebuddy/.credentials.json`，当前路径/权限未实测。 | 复用已审计的 connector 0600/Windows ACL config。 |
-| 学员须取得并输入 `wb_` | **仍需要。** 它只收集现有值，不创建/转移值。 | **不需要。** 短码不是 credential；最终 `wb_` 直接交给本机。 |
-| 严格“不经过剪贴板” | 不满足；从网页复制到弹窗仍经过剪贴板，手打长 token 体验也不可接受。 | 满足，`wb_` 不出现在可复制 UI。 |
-| 已登录网页授权、特定设备确认、拒绝/过期/替换 | 不提供。 | 提供。 |
-| 服务端增量 | 接近零，但依赖插件真实实现。 | 完整增量见后文。 |
+| 维度                                         | `sensitive userConfig`                                                                  | WDP 设备码 / 浏览器确认                                     |
+| -------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| token 不进 WorkBuddy 对话、Skill、事件文件   | 若平台承诺兑现，可解决。                                                                | 可解决；token 从未交给 WorkBuddy 文本层。                   |
+| token 不成为命令行参数                       | 可解决，但前提是只读子进程环境，绝不用 substitution。                                   | 可解决；token 只来自 poll HTTPS response。                  |
+| 本机安全存储                                 | 文档承诺 Keychain；不可用时回退 `~/.codebuddy/.credentials.json`，当前路径/权限未实测。 | 复用已审计的 connector 0600/Windows ACL config。            |
+| 学员须取得并输入 `wb_`                       | **仍需要。** 它只收集现有值，不创建/转移值。                                            | **不需要。** 短码不是 credential；最终 `wb_` 直接交给本机。 |
+| 严格“不经过剪贴板”                           | 不满足；从网页复制到弹窗仍经过剪贴板，手打长 token 体验也不可接受。                     | 满足，`wb_` 不出现在可复制 UI。                             |
+| 已登录网页授权、特定设备确认、拒绝/过期/替换 | 不提供。                                                                                | 提供。                                                      |
+| 服务端增量                                   | 接近零，但依赖插件真实实现。                                                            | 完整增量见后文。                                            |
 
 结论：若目标暂时收窄为“先阻断 token 进入 timeline”，验证成功的 `userConfig` 是更小的过渡方案；若目标保持“已登录网页一键接入、不让学员接触/输入/复制 `wb_`”，它不是 WDP 的替代品。
 
@@ -86,17 +86,17 @@ P0 只应记录“变量存在/长度/哈希”，绝不记录原值，并产出
 
 以下为读代码得到的事实，不是本报告的设计建议。
 
-| 事实 | 证据 | 对设计的含义 |
-| --- | --- | --- |
-| `wb_` 凭证由 32 个随机字节生成，数据库只接收 SHA-256 hash 和短前缀。 | `src/lib/workbuddy/credentials.server.ts:175-227` | 新流程应继续复用 token 格式、hash-only 存储和前缀展示。 |
-| `workbuddy_credentials` 只允许 service role 访问；解析 RPC 只返回状态和 `student_id`，并不返回明文。 | `supabase/migrations/20260723090100_cloud_integration.sql:185-216,943-992` | 设备配对表须采用同一权限模型；不能让浏览器或 anon 直读凭证表。 |
-| 当前每名学员最多一个 active credential；现有签发 RPC 在 `_rotate=true` 时会撤销旧凭证，并使用学员级 advisory lock。 | `supabase/migrations/20260723090300_reliable_delivery.sql:21-23,480-585` | 网页确认必须在替换现有连接时明确提示；消费短码的事务也必须复用该锁语义。 |
-| `/workbuddy` 目前会把新 token 显示、复制，并提示粘贴到安装器。 | `src/routes/_authenticated/workbuddy.tsx:254-361` | 这是要替换的常规 UX；新 UI 不应再渲染 `wb_`。 |
-| connector 的 `configure` 将 `{version, api_url, token}` 原子写入 config；POSIX state 目录为 0700、文件为 0600，Windows 安装器收紧为当前用户 ACL。 | `connectors/workbuddy-sync.mjs:71-141,798-910`；`docs/workbuddy-connector.md:21-25,59-65` | 最终凭证仍落在同一受保护位置；短时配对状态应使用同等级但独立的临时文件。 |
-| 现有 connector HTTP 路径先读取本地 token 并固定发送 bearer；已有 HTTPS 校验、拒绝重定向、限长响应、超时和抖动重试。 | `connectors/workbuddy-sync.mjs:226-290,799-895` | 新增无 bearer 的设备授权请求 helper；复用 TLS、URL 校验、无重定向、限长和重试模式，不能复用“自动附 bearer”的 helper。 |
-| 现有安装器在凭证配置后才注册 Stop hook、定时任务和导入。 | `connectors/install-macos.sh` 与 `public/downloads/install-windows.ps1` 的 configure/注册顺序；`docs/workbuddy-connector.md:52-57,76-82` | 设备授权应位于“程序文件已安装”之后、“注册 hook/定时任务/导入”之前。授权失败时不启动未配置的后台任务。 |
-| Stop hook 会把完整 turn 的 prompt/reply 入队；服务端最终写入 `timeline_items`。 | `connectors/workbuddy-hook.mjs:95-270`；`src/lib/workbuddy/events.server.ts:73-99`；`20260723090100_cloud_integration.sql:1143-1173` | 将 `wb_` 放进 WorkBuddy 提问确会使它进入学员 timeline，导师可见；设备流程必须完全绕开对话文本。 |
-| 现有公共 WorkBuddy API 都需要 bearer credential；项目未发现可复用的通用公开 API 限流器。 | `src/routes/api/public/workbuddy/ingest.ts:109-151`；`mentor-messages.ts:69-115`；`src/lib/workbuddy/public-route.ts` | 新端点必须另加“授权前”的认证和限流，不能复制现有 `Access-Control-Allow-Origin: *`。 |
+| 事实                                                                                                                                              | 证据                                                                                                                                     | 对设计的含义                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `wb_` 凭证由 32 个随机字节生成，数据库只接收 SHA-256 hash 和短前缀。                                                                              | `src/lib/workbuddy/credentials.server.ts:175-227`                                                                                        | 新流程应继续复用 token 格式、hash-only 存储和前缀展示。                                                               |
+| `workbuddy_credentials` 只允许 service role 访问；解析 RPC 只返回状态和 `student_id`，并不返回明文。                                              | `supabase/migrations/20260723090100_cloud_integration.sql:185-216,943-992`                                                               | 设备配对表须采用同一权限模型；不能让浏览器或 anon 直读凭证表。                                                        |
+| 当前每名学员最多一个 active credential；现有签发 RPC 在 `_rotate=true` 时会撤销旧凭证，并使用学员级 advisory lock。                               | `supabase/migrations/20260723090300_reliable_delivery.sql:21-23,480-585`                                                                 | 网页确认必须在替换现有连接时明确提示；消费短码的事务也必须复用该锁语义。                                              |
+| `/workbuddy` 目前会把新 token 显示、复制，并提示粘贴到安装器。                                                                                    | `src/routes/_authenticated/workbuddy.tsx:254-361`                                                                                        | 这是要替换的常规 UX；新 UI 不应再渲染 `wb_`。                                                                         |
+| connector 的 `configure` 将 `{version, api_url, token}` 原子写入 config；POSIX state 目录为 0700、文件为 0600，Windows 安装器收紧为当前用户 ACL。 | `connectors/workbuddy-sync.mjs:71-141,798-910`；`docs/workbuddy-connector.md:21-25,59-65`                                                | 最终凭证仍落在同一受保护位置；短时配对状态应使用同等级但独立的临时文件。                                              |
+| 现有 connector HTTP 路径先读取本地 token 并固定发送 bearer；已有 HTTPS 校验、拒绝重定向、限长响应、超时和抖动重试。                               | `connectors/workbuddy-sync.mjs:226-290,799-895`                                                                                          | 新增无 bearer 的设备授权请求 helper；复用 TLS、URL 校验、无重定向、限长和重试模式，不能复用“自动附 bearer”的 helper。 |
+| 现有安装器在凭证配置后才注册 Stop hook、定时任务和导入。                                                                                          | `connectors/install-macos.sh` 与 `public/downloads/install-windows.ps1` 的 configure/注册顺序；`docs/workbuddy-connector.md:52-57,76-82` | 设备授权应位于“程序文件已安装”之后、“注册 hook/定时任务/导入”之前。授权失败时不启动未配置的后台任务。                 |
+| Stop hook 会把完整 turn 的 prompt/reply 入队；服务端最终写入 `timeline_items`。                                                                   | `connectors/workbuddy-hook.mjs:95-270`；`src/lib/workbuddy/events.server.ts:73-99`；`20260723090100_cloud_integration.sql:1143-1173`     | 将 `wb_` 放进 WorkBuddy 提问确会使它进入学员 timeline，导师可见；设备流程必须完全绕开对话文本。                       |
+| 现有公共 WorkBuddy API 都需要 bearer credential；项目未发现可复用的通用公开 API 限流器。                                                          | `src/routes/api/public/workbuddy/ingest.ts:109-151`；`mentor-messages.ts:69-115`；`src/lib/workbuddy/public-route.ts`                    | 新端点必须另加“授权前”的认证和限流，不能复制现有 `Access-Control-Allow-Origin: *`。                                   |
 
 ## OAuth 是否能直接复用
 
@@ -112,13 +112,13 @@ Supabase 现行 OAuth Server 文档只列出 Authorization Code with PKCE 和 Re
 
 ### 可复用项与不复用项
 
-| 组件 | 策略 | 原因 |
-| --- | --- | --- |
-| 浏览器 Supabase 登录态、`requireSupabaseAuth` | 🟢 直接复用 | 只用来确认“哪个已登录学员批准这次配对”；身份从服务端 context 取得。 |
-| consent 页的“对象信息 + 同意/拒绝”交互 | 🟡 借鉴 | 新页面必须每次确认、显示短码与本机信息，不复用 OAuth authorization_id。 |
-| `createFirst/rotate/revoke` 的 hash-only 规则、student lock、凭证 resolver | 🟢 复用/抽取 | 保持 credential 生命周期和 public API 鉴权不变。 |
-| `/.well-known/oauth-protected-resource`、`/mcp`、`supabase.auth.oauth.*` | ⚪ 不用 | 都属于 MCP/OAuth authorization-code 的协议面，不解决配对。 |
-| OAuth access/refresh token | ⚪ 不用 | 不能替代 `wb_`，且权限过宽。 |
+| 组件                                                                       | 策略         | 原因                                                                    |
+| -------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------- |
+| 浏览器 Supabase 登录态、`requireSupabaseAuth`                              | 🟢 直接复用  | 只用来确认“哪个已登录学员批准这次配对”；身份从服务端 context 取得。     |
+| consent 页的“对象信息 + 同意/拒绝”交互                                     | 🟡 借鉴      | 新页面必须每次确认、显示短码与本机信息，不复用 OAuth authorization_id。 |
+| `createFirst/rotate/revoke` 的 hash-only 规则、student lock、凭证 resolver | 🟢 复用/抽取 | 保持 credential 生命周期和 public API 鉴权不变。                        |
+| `/.well-known/oauth-protected-resource`、`/mcp`、`supabase.auth.oauth.*`   | ⚪ 不用      | 都属于 MCP/OAuth authorization-code 的协议面，不解决配对。              |
+| OAuth access/refresh token                                                 | ⚪ 不用      | 不能替代 `wb_`，且权限过宽。                                            |
 
 ## 推荐协议：WDP v1
 
@@ -132,12 +132,12 @@ RFC 8628 的关键可复用原则是：设备显示 `user_code`，设备持有�
 
 以下为**设计建议**。
 
-| 材料 | 生成与长度 | 能出现的位置 | 服务器持久化 | 生命周期 |
-| --- | --- | --- | --- | --- |
-| `user_code` | CSPRNG；12 位 base20（`BCDFGHJKLMNPQRSTVWXZ`），显示为 `BCDF-GHJK-LMNP`，约 52 bit | 安装器/插件配对面板、学员确认页；不可复制为默认动作 | 只存 `HMAC-SHA-256(K, "user-code:v1" || normalized_code)` | 10 分钟 |
-| `device_code` | CSPRNG 32 bytes (256 bit)，base64url | 仅首次 start 的 HTTPS 响应体、connector 内存和 0600/ACL 临时文件；**绝不显示**、不进 URL/日志 | 只存 `HMAC-SHA-256(K, "device-code:v1" || value)` | 至 ack；最长 10 分钟 |
-| `wb_` credential | `wb_` + base64url(`HMAC-SHA-256(K, "credential:v1" || device_code)`) | poll 的 HTTPS 响应体、本机内存、最终私有 config；绝不显示或复制 | 仍只存既有 SHA-256 hash 与前缀 | 有效至撤销/轮换 |
-| `K` | 新环境密钥 `WORKBUDDY_DEVICE_PROVISIONING_KEY`，至少 32 random bytes | 仅 application server secret store | 不入数据库、不入 bundle | 依部署密钥轮换策略 |
+| 材料             | 生成与长度                                                                         | 能出现的位置                                                                                  | 服务器持久化                           | 生命周期                                                        |
+| ---------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------- | ------------------------------ | -------------------- |
+| `user_code`      | CSPRNG；12 位 base20（`BCDFGHJKLMNPQRSTVWXZ`），显示为 `BCDF-GHJK-LMNP`，约 52 bit | 安装器/插件配对面板、学员确认页；不可复制为默认动作                                           | 只存 `HMAC-SHA-256(K, "user-code:v1"   |                                                                 | normalized_code)`              | 10 分钟              |
+| `device_code`    | CSPRNG 32 bytes (256 bit)，base64url                                               | 仅首次 start 的 HTTPS 响应体、connector 内存和 0600/ACL 临时文件；**绝不显示**、不进 URL/日志 | 只存 `HMAC-SHA-256(K, "device-code:v1" |                                                                 | value)`                        | 至 ack；最长 10 分钟 |
+| `wb_` credential | `wb_` + base64url(`HMAC-SHA-256(K, "credential:v1"                                 |                                                                                               | device_code)`)                         | poll 的 HTTPS 响应体、本机内存、最终私有 config；绝不显示或复制 | 仍只存既有 SHA-256 hash 与前缀 | 有效至撤销/轮换      |
+| `K`              | 新环境密钥 `WORKBUDDY_DEVICE_PROVISIONING_KEY`，至少 32 random bytes               | 仅 application server secret store                                                            | 不入数据库、不入 bundle                | 依部署密钥轮换策略                                              |
 
 `HMAC` 的 label 做 domain separation。`device_code` 由 CSPRNG 生成且为 256 bit；由服务端 secret 派生的 `wb_` 同样不可预测。这个确定性派生解决了一个重要的可靠性问题：若服务端已签发但 HTTPS 成功响应在途中丢失，同一持有 `device_code` 的 connector 可以在短暂交付窗口内取回**同一个** `wb_`，无需让数据库保存明文 token。
 
@@ -271,15 +271,15 @@ public.poll_workbuddy_device_authorization(
 
 新增 **3 个 connector 公共端点**，再新增一个已认证网页路由和 3 个同源 server function（或等价的已认证 API）。它们与 MCP OAuth 无耦合。
 
-| 接口 | 鉴权 | 请求 / 响应 | 行为 |
-| --- | --- | --- | --- |
-| `POST /api/public/workbuddy/device-authorizations` | 无 bearer；WAF/IP 限流 | 请求：`{platform, connector_version}`。响应 200：`{device_code, user_code, verification_uri, expires_in:600, interval:5, device_label}` | start。服务器生成两种 code 和 label；`verification_uri` 固定为 `/workbuddy/connect-device`，不包含 code 或 secret。 |
-| `POST /api/public/workbuddy/device-authorizations/poll` | `device_code` 是短时 bearer proof；只允许 JSON POST body | 请求：`{device_code}`。响应：202 `authorization_pending`；429 `slow_down` + `Retry-After`；200 `{credential:"wb_…", token_type:"WorkBuddy"}`；终止错误 `access_denied` / `expired_token` / `invalid_request` | 路由层先 HMAC raw code，再调用 RPC 2。仅 `delivering` 时将确定性派生 token 放进响应；不记录请求体。 |
-| `POST /api/public/workbuddy/device-authorizations/ack` | 同上 | 请求：`{device_code}`；响应 204 | connector 的 config 已原子落盘后调用；关闭可重取窗口。 |
-| `GET /workbuddy/connect-device` | 正常网页登录 | HTML/React 页面 | 未登录先到 `/auth`，登录后回同一路径；无 code query。 |
-| `previewDeviceAuthorization({user_code})` | `requireSupabaseAuth` 同源 ServerFn | 返回有限的设备摘要与是否存在 active credential | 输入页验证短码，展示确认页；无效/过期统一文案。 |
-| `approveDeviceAuthorization({user_code, replace_active_credential, confirmed:true})` | 同上 | 调 RPC 1 | 必须显式确认；绝不接受 `student_id`。 |
-| `denyDeviceAuthorization({user_code})` | 同上 | 状态置 `denied` | 终态；connector 停止 poll 并删除临时文件。 |
+| 接口                                                                                 | 鉴权                                                     | 请求 / 响应                                                                                                                                                                                                  | 行为                                                                                                                |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/public/workbuddy/device-authorizations`                                   | 无 bearer；WAF/IP 限流                                   | 请求：`{platform, connector_version}`。响应 200：`{device_code, user_code, verification_uri, expires_in:600, interval:5, device_label}`                                                                      | start。服务器生成两种 code 和 label；`verification_uri` 固定为 `/workbuddy/connect-device`，不包含 code 或 secret。 |
+| `POST /api/public/workbuddy/device-authorizations/poll`                              | `device_code` 是短时 bearer proof；只允许 JSON POST body | 请求：`{device_code}`。响应：202 `authorization_pending`；429 `slow_down` + `Retry-After`；200 `{credential:"wb_…", token_type:"WorkBuddy"}`；终止错误 `access_denied` / `expired_token` / `invalid_request` | 路由层先 HMAC raw code，再调用 RPC 2。仅 `delivering` 时将确定性派生 token 放进响应；不记录请求体。                 |
+| `POST /api/public/workbuddy/device-authorizations/ack`                               | 同上                                                     | 请求：`{device_code}`；响应 204                                                                                                                                                                              | connector 的 config 已原子落盘后调用；关闭可重取窗口。                                                              |
+| `GET /workbuddy/connect-device`                                                      | 正常网页登录                                             | HTML/React 页面                                                                                                                                                                                              | 未登录先到 `/auth`，登录后回同一路径；无 code query。                                                               |
+| `previewDeviceAuthorization({user_code})`                                            | `requireSupabaseAuth` 同源 ServerFn                      | 返回有限的设备摘要与是否存在 active credential                                                                                                                                                               | 输入页验证短码，展示确认页；无效/过期统一文案。                                                                     |
+| `approveDeviceAuthorization({user_code, replace_active_credential, confirmed:true})` | 同上                                                     | 调 RPC 1                                                                                                                                                                                                     | 必须显式确认；绝不接受 `student_id`。                                                                               |
+| `denyDeviceAuthorization({user_code})`                                               | 同上                                                     | 状态置 `denied`                                                                                                                                                                                              | 终态；connector 停止 poll 并删除临时文件。                                                                          |
 
 所有三条公开端点均设置 `Cache-Control: no-store`、`Pragma: no-cache`、JSON `Content-Type`、`X-Content-Type-Options: nosniff`，不设置 `Access-Control-Allow-Origin: *`。配对页面设置 `Referrer-Policy: no-referrer`、`Content-Security-Policy: frame-ancestors 'none'`、`X-Frame-Options: DENY`，不加载第三方脚本/图片/分析像素。`Cache-Control: no-store` 可避免敏感 API 响应进入浏览器或共享缓存；这是 OWASP 的明确建议。[OWASP REST Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html)
 
@@ -352,19 +352,19 @@ connector 需新增一个**无 bearer** `requestDeviceJson`，复用现有：HTT
 
 ## 安全要求与逐项落实
 
-| 要求/威胁 | 设计控制 | 验证要点 |
-| --- | --- | --- |
-| 短码熵与有效期 | 12 位 base20（约 52 bit）、10 分钟、规范化为大写且忽略分隔符；唯一索引碰撞时重生。 | 单测生成字符集/长度/碰撞重试；时钟测试过期。 |
-| 一次性消费 | `approved → delivering → consumed`；RPC 2 锁行并仅在 `approved` 插入一条 credential；ack 后永不再返回 token。 | 并发 20 poll 只新增一条 credential；ack 后 poll 无 token。 |
-| 响应丢失但不存明文 | `delivering` 的有限窗口内，由同一 `device_code` + server HMAC 派生相同 `wb_`；config 成功后 ack 关闭窗口；未 ack 的 credential 由每分钟清理任务撤销。 | 模拟 RPC 成功/响应断开/重试，得到同一 token；DB 查不到明文。 |
-| 暴力枚举与资源耗尽 | 强制 WAF/edge policy：start 每 IP 10/15min；poll 每 IP 60/min；确认输入每 IP 10/min、每已登录账号 5/10min。RPC 另按 `poll_not_before` 强制单会话最少 5 秒，违例 `slow_down`。 | 429/Retry-After、WAF 配置验收、数据库时间竞争测试。 |
-| 未授权 connector 如何轮询 | 不使用静态 client secret，也不使用短码；`device_code` 是短时 256-bit bearer proof，放 JSON POST body。设备客户端按 public client 对待。 | 请求 headers、URL、日志、临时文件权限审计。 |
-| device code 重放 | HMAC 存库而非明文；只有 `delivering` 的未 ack 窗口可同码重取同一 token，ack/过期后拒绝；不可能用短码重放。 | ack 后/过期后均无 token；随机错误不泄露会话存在。 |
-| 误确认别人的设备/钓鱼 | 固定 URL + 手工输入短码；页面展示并要求核对短码、本机 platform/version/label、到期时间和“设备在身边”确认；直接 URL/QR 也强制二次核对。 | UI 测试：预填码不能直接批准；错误码、旧码、不同码均不能批准。 |
-| 学员身份绑定 | 确认 action 从 `requireSupabaseAuth` 的服务端 `context.userId` 映射 student；客户端不传/不信任 `student_id`。 | 用 A 的 browser token 尝试绑定 B 的 ID 必须无效；staff 账户被拒绝。 |
-| 已存在连接 | UI 先显示安全前缀并要求显式替换；消费 RPC 再次在事务内检查 active 行并锁定，防止并发批准双发。 | 不勾选替换时旧 token 连续可用；勾选后原子轮换。 |
+| 要求/威胁                     | 设计控制                                                                                                                                                                         | 验证要点                                                                        |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| 短码熵与有效期                | 12 位 base20（约 52 bit）、10 分钟、规范化为大写且忽略分隔符；唯一索引碰撞时重生。                                                                                               | 单测生成字符集/长度/碰撞重试；时钟测试过期。                                    |
+| 一次性消费                    | `approved → delivering → consumed`；RPC 2 锁行并仅在 `approved` 插入一条 credential；ack 后永不再返回 token。                                                                    | 并发 20 poll 只新增一条 credential；ack 后 poll 无 token。                      |
+| 响应丢失但不存明文            | `delivering` 的有限窗口内，由同一 `device_code` + server HMAC 派生相同 `wb_`；config 成功后 ack 关闭窗口；未 ack 的 credential 由每分钟清理任务撤销。                            | 模拟 RPC 成功/响应断开/重试，得到同一 token；DB 查不到明文。                    |
+| 暴力枚举与资源耗尽            | 强制 WAF/edge policy：start 每 IP 10/15min；poll 每 IP 60/min；确认输入每 IP 10/min、每已登录账号 5/10min。RPC 另按 `poll_not_before` 强制单会话最少 5 秒，违例 `slow_down`。    | 429/Retry-After、WAF 配置验收、数据库时间竞争测试。                             |
+| 未授权 connector 如何轮询     | 不使用静态 client secret，也不使用短码；`device_code` 是短时 256-bit bearer proof，放 JSON POST body。设备客户端按 public client 对待。                                          | 请求 headers、URL、日志、临时文件权限审计。                                     |
+| device code 重放              | HMAC 存库而非明文；只有 `delivering` 的未 ack 窗口可同码重取同一 token，ack/过期后拒绝；不可能用短码重放。                                                                       | ack 后/过期后均无 token；随机错误不泄露会话存在。                               |
+| 误确认别人的设备/钓鱼         | 固定 URL + 手工输入短码；页面展示并要求核对短码、本机 platform/version/label、到期时间和“设备在身边”确认；直接 URL/QR 也强制二次核对。                                           | UI 测试：预填码不能直接批准；错误码、旧码、不同码均不能批准。                   |
+| 学员身份绑定                  | 确认 action 从 `requireSupabaseAuth` 的服务端 `context.userId` 映射 student；客户端不传/不信任 `student_id`。                                                                    | 用 A 的 browser token 尝试绑定 B 的 ID 必须无效；staff 账户被拒绝。             |
+| 已存在连接                    | UI 先显示安全前缀并要求显式替换；消费 RPC 再次在事务内检查 active 行并锁定，防止并发批准双发。                                                                                   | 不勾选替换时旧 token 连续可用；勾选后原子轮换。                                 |
 | 缓存、Referer、CORS、日志泄漏 | no-store/no-cache；固定确认 URL；无 `*` CORS；页面 no-referrer、禁止 frame、无第三方资源；log allowlist 只记授权行 UUID、状态、时间、request id，绝不记 body/header/code/token。 | 端到端搜 `wb_`、`device_code`、request body；检查响应头与 access/APM scrubber。 |
-| 本机恶意软件 | 0600/ACL、短时临时文件、完成后删除、无静态 client secret；不声称可抵御拥有当前用户权限的恶意软件。 | POSIX mode/Windows ACL 自动化测试。 |
+| 本机恶意软件                  | 0600/ACL、短时临时文件、完成后删除、无静态 client secret；不声称可抵御拥有当前用户权限的恶意软件。                                                                               | POSIX mode/Windows ACL 自动化测试。                                             |
 
 RFC 8628 将 device client 视为不能保守静态 client credential 的 public client，并要求 device code 有很高熵；本设计因此没有“藏在插件里的 client_secret”。[RFC 8628 §5.2、§5.6](https://www.rfc-editor.org/rfc/rfc8628.html#section-5.6)
 
@@ -374,15 +374,15 @@ RFC 8628 将 device client 视为不能保守静态 client credential 的 public
 
 ## 失败、恢复与降级
 
-| 场景 | 学员体验 | connector/服务端行为 |
-| --- | --- | --- |
-| 浏览器无法自动打开 | 配对面板保留固定 URL 和短码；可在同机或手机浏览器打开 URL、手输短码。 | 自动打开失败不是失败；不把 `device_code` 放 URL。 |
-| 短码过期 | 网页提示回到安装器重试。 | poll 返回 `expired_token`；删除临时文件；仅在用户点击“重试”后创建新会话，禁止自动无限循环。 |
-| 学员点击拒绝 | 网页显示已拒绝。 | poll 返回 `access_denied`；删除临时文件、不写 config、不注册 hook。 |
-| start/poll 网络中断 | 安装面板显示“等待网络/继续重试”。 | 保留 0600 pending 文件；指数退避；恢复后从同一会话继续，未过期不生成新短码。 |
-| token 响应到达但本地 config 写失败 | 不要求学员重新确认。 | 不 ack；在 `delivering` 窗口内同一 device code 重取确定性的同一 token；重试原子写。 |
-| config 已写、ack 网络失败/进程崩溃 | 显示“本地已连接，正在完成确认”；下次启动可继续。 | 保留 pending 文件，仅重试 ack；完成前不注册 hook/schedule。超过窗口未 ack 的 cleanup 会撤销 orphan credential，随后须重新配对。 |
-| 同时/之后出现另一 active credential | 网页明确提示替换；不能静默抢占。 | 消费事务检测冲突，置 `conflicted`，要求重新发起并重新确认。 |
+| 场景                                | 学员体验                                                              | connector/服务端行为                                                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 浏览器无法自动打开                  | 配对面板保留固定 URL 和短码；可在同机或手机浏览器打开 URL、手输短码。 | 自动打开失败不是失败；不把 `device_code` 放 URL。                                                                               |
+| 短码过期                            | 网页提示回到安装器重试。                                              | poll 返回 `expired_token`；删除临时文件；仅在用户点击“重试”后创建新会话，禁止自动无限循环。                                     |
+| 学员点击拒绝                        | 网页显示已拒绝。                                                      | poll 返回 `access_denied`；删除临时文件、不写 config、不注册 hook。                                                             |
+| start/poll 网络中断                 | 安装面板显示“等待网络/继续重试”。                                     | 保留 0600 pending 文件；指数退避；恢复后从同一会话继续，未过期不生成新短码。                                                    |
+| token 响应到达但本地 config 写失败  | 不要求学员重新确认。                                                  | 不 ack；在 `delivering` 窗口内同一 device code 重取确定性的同一 token；重试原子写。                                             |
+| config 已写、ack 网络失败/进程崩溃  | 显示“本地已连接，正在完成确认”；下次启动可继续。                      | 保留 pending 文件，仅重试 ack；完成前不注册 hook/schedule。超过窗口未 ack 的 cleanup 会撤销 orphan credential，随后须重新配对。 |
+| 同时/之后出现另一 active credential | 网页明确提示替换；不能静默抢占。                                      | 消费事务检测冲突，置 `conflicted`，要求重新发起并重新确认。                                                                     |
 
 ## 与插件化安装的协作契约（WDP 路径）
 
@@ -400,14 +400,14 @@ RFC 8628 将 device client 视为不能保守静态 client credential 的 public
 
 ## 安全边界变化
 
-| 边界 | 当前手动粘贴 | WDP 后 | 为什么仍安全 |
-| --- | --- | --- | --- |
-| 学员对话/timeline | 学员可能把 `wb_` 粘进 WorkBuddy prompt，Stop hook 采集并上传。 | token 不经模型或对话；hook 注册也在授权成功后。 | 根因路径被移除，而非依赖提示学员“不要粘贴”。 |
-| 浏览器 | 页面一次性显示并可复制长期 token。 | 页面只批准短时、不可兑换的短码；不渲染 `wb_`。 | 身份来自已登录 session，确认操作与设备绑定独立。 |
-| 服务器数据库 | 仅 credential hash/prefix。 | 新增最多 10 分钟的 pairing metadata/HMAC/学生绑定/设备摘要。 | 不新增明文 credential；表仍 service-role-only，且不关联 timeline 读取路径。 |
-| 未授权 connector | 无身份，必须向用户索要 token。 | 持有临时 `device_code` bearer proof。 | 256 bit、短时、私有临时文件、只 POST、ack 后失效；它不是静态 credential。 |
-| 服务端密钥 | 只依赖服务 role 与 CSPRNG 签发。 | 多一个 device provisioning HMAC key。 | key 仅在 secret store；影响限于未完成交付；轮换流程明确。 |
-| 已授权 connector | config 内保存长期 `wb_`。 | 不变。 | 继续使用现有 0600/ACL，现有 resolver/public API scope 不变。 |
+| 边界              | 当前手动粘贴                                                   | WDP 后                                                       | 为什么仍安全                                                                |
+| ----------------- | -------------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| 学员对话/timeline | 学员可能把 `wb_` 粘进 WorkBuddy prompt，Stop hook 采集并上传。 | token 不经模型或对话；hook 注册也在授权成功后。              | 根因路径被移除，而非依赖提示学员“不要粘贴”。                                |
+| 浏览器            | 页面一次性显示并可复制长期 token。                             | 页面只批准短时、不可兑换的短码；不渲染 `wb_`。               | 身份来自已登录 session，确认操作与设备绑定独立。                            |
+| 服务器数据库      | 仅 credential hash/prefix。                                    | 新增最多 10 分钟的 pairing metadata/HMAC/学生绑定/设备摘要。 | 不新增明文 credential；表仍 service-role-only，且不关联 timeline 读取路径。 |
+| 未授权 connector  | 无身份，必须向用户索要 token。                                 | 持有临时 `device_code` bearer proof。                        | 256 bit、短时、私有临时文件、只 POST、ack 后失效；它不是静态 credential。   |
+| 服务端密钥        | 只依赖服务 role 与 CSPRNG 签发。                               | 多一个 device provisioning HMAC key。                        | key 仅在 secret store；影响限于未完成交付；轮换流程明确。                   |
+| 已授权 connector  | config 内保存长期 `wb_`。                                      | 不变。                                                       | 继续使用现有 0600/ACL，现有 resolver/public API scope 不变。                |
 
 不能消除的边界：拥有该学员本机当前用户权限的恶意软件能读 config 或窃取内存中的短时 device code；同样也可直接操纵 WorkBuddy。本设计缩短并收紧了授权前窗口，但不声称防御本机已失陷。若未来必须防御该类威胁，应另做每安装实例密钥对、证明持有（PoP）和 token 加密交付，成本明显更高，超出本次最小增量。
 
@@ -441,15 +441,15 @@ RFC 8628 将 device client 视为不能保守静态 client credential 的 public
 
 ### 估算（1 名熟悉本仓库的工程师）
 
-| 范围 | 内容 | 估算 |
-| --- | --- | --- |
-| P0 userConfig 验证 | 临时测试插件、启用/环境/Keychain-or-fallback/卸载重装验证、无值泄漏审计 | 0.5–1 人日 |
-| userConfig 过渡路径（仅 P0 成功且产品接受手输） | manifest、仅环境变量读取、connector 适配、平台行为回归和泄漏测试 | 1.5–3 人日 |
-| 服务端 | migration、2 RPC、清理任务、3 public handlers、auth server functions、限流/headers/secret scrubber、pgTAP/集成测试 | 4–5 人日 |
-| connector / 安装器 | pending 文件、无 bearer helper、状态机、platform opener、ack/recovery、三平台测试与下载资产同步 | 3–4 人日 |
-| 网页 | connect-device 页面、确认/拒绝/替换 UI、移除默认 token 展示、端到端测试 | 1.5–2 人日 |
-| 插件对接 | 调用程序接口、非对话安装面板、finalize 顺序；取决于并行插件调研结论 | 1–2 人日 |
-| 安全/发布验证 | WAF 配置、密钥轮换演练、日志审计、灰度与回滚演练 | 1.5–2 人日 |
+| 范围                                            | 内容                                                                                                               | 估算       |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ---------- |
+| P0 userConfig 验证                              | 临时测试插件、启用/环境/Keychain-or-fallback/卸载重装验证、无值泄漏审计                                            | 0.5–1 人日 |
+| userConfig 过渡路径（仅 P0 成功且产品接受手输） | manifest、仅环境变量读取、connector 适配、平台行为回归和泄漏测试                                                   | 1.5–3 人日 |
+| 服务端                                          | migration、2 RPC、清理任务、3 public handlers、auth server functions、限流/headers/secret scrubber、pgTAP/集成测试 | 4–5 人日   |
+| connector / 安装器                              | pending 文件、无 bearer helper、状态机、platform opener、ack/recovery、三平台测试与下载资产同步                    | 3–4 人日   |
+| 网页                                            | connect-device 页面、确认/拒绝/替换 UI、移除默认 token 展示、端到端测试                                            | 1.5–2 人日 |
+| 插件对接                                        | 调用程序接口、非对话安装面板、finalize 顺序；取决于并行插件调研结论                                                | 1–2 人日   |
+| 安全/发布验证                                   | WAF 配置、密钥轮换演练、日志审计、灰度与回滚演练                                                                   | 1.5–2 人日 |
 
 P0 后若仅交付 userConfig 过渡路径，约 **2–4 人日**（但不满足无剪贴板一键目标）。P0 后交付完整 WDP 约 **11–15 人日**，服务端、connector、网页可部分并行，完整可灰度版本预计 **6–8 个工作日**；两条都做则在 WDP 基础上增加约 **1.5–3 人日**。
 
