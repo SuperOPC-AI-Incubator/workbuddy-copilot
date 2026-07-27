@@ -147,7 +147,26 @@ but is older than the `libpq5 (>= 17.9)` the package declares. Removing
 no global IPv6 address, so a direct connection can never work from here. Use the
 dashboard's **Session pooler** connection (port 5432), not the transaction
 pooler on 6543: transaction pooling does not preserve the session state
-`pg_dump` relies on. The pooler user is `postgres.<project-ref>`.
+`pg_dump` relies on. The pooler user is `postgres.<project-ref>` and the verified
+host is `aws-0-ap-southeast-1.pooler.supabase.com`; the `aws-1` host in the same
+region resolves but answers `tenant/user not found`, so a wrong guess fails loudly
+rather than silently.
+
+## Checking that a backup is real
+
+The script's marker check proves the dump mentions the expected tables, which a
+schema-only dump would also satisfy. To confirm a dump actually carries data,
+compare its `COPY` block row counts against the live database:
+
+```bash
+gunzip -c /var/backups/superbrain-copilot/superbrain-copilot-latest.sql.gz |
+  awk '/^COPY "(public|auth)"\./ { t=$2; n=0; inb=1; next }
+       inb && /^\\\.$/ { printf "%-40s %d\n", t, n; inb=0; next }
+       inb { n++ }'
+```
+
+The first verified run matched the live database exactly: 7 students, 9 timeline
+items, 3 sessions, 6 auth users and 4 staff accounts.
 
 The dump is verified before it replaces the retained copy: a size floor plus the
 presence of `"public"."students"`, `"public"."timeline_items"` and
