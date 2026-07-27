@@ -32,8 +32,25 @@ afterEach(async () => {
       }
     }),
   );
+  // Linux CI 上出现过 ENOTEMPTY：递归删除进行中仍有文件被创建。connector 的
+  // 可靠性层带 lease 心跳，会周期性重写锁文件，删除与心跳可能交错；macOS 上
+  // 时序不同，没暴露过。这里做有界重试，而不是在无法复现的平台上盲改产品代码。
+  // 根因待确认，见 issue #5。
   await Promise.all(
-    cleanupPaths.splice(0).map((path) => rm(path, { force: true, recursive: true })),
+    cleanupPaths.splice(0).map(async (path) => {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        try {
+          await rm(path, { force: true, recursive: true });
+          return;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ENOTEMPTY" && code !== "EBUSY") throw error;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      // 最后一次不吞异常：真删不掉必须让用例红，不能静默留下残留。
+      await rm(path, { force: true, recursive: true });
+    }),
   );
 });
 
