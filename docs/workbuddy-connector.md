@@ -90,6 +90,7 @@ workbuddy-sync flush
 workbuddy-sync import --since 7d
 workbuddy-sync status
 workbuddy-sync test-connection
+workbuddy-sync ipc [--poll-interval-ms 30000]
 ```
 
 Use the absolute wrapper path shown above when invoking these commands from
@@ -100,6 +101,26 @@ be on `PATH`.
 `--token-stdin` explicitly enables standard-input credential delivery.
 There is intentionally no credential command-line option or environment
 variable.
+
+`ipc` is a long-running local agent endpoint for a future display shell. It
+prints its private endpoint and capability-token file path as JSON once it is
+ready and exits cleanly on `SIGINT` or `SIGTERM`; it does not open a TCP port.
+`--poll-interval-ms` is optional (the default is currently 30000); a shell must
+read the active value from IPC `status`, not assume that default.
+
+On POSIX the endpoint is a `0600` Unix domain socket. On Windows it is a named
+pipe. Every shell must include the per-agent-run capability token from
+`ipc-capability.token` in `hello`; the service silently closes an unauthenticated
+connection and never returns the token or the configured cloud credential. The
+token file is inside the existing current-user-only state directory (POSIX 0700;
+Windows installer ACL), so it is the Windows access boundary without introducing
+a compiled native addon. Socket/pipe permissions remain defence in depth.
+
+`messages.displayed` means the agent has durably accepted the shell's display
+claim, not that its upstream acknowledgement has finished. The connector retries
+the latter in the background and resumes outstanding acknowledgements after a
+restart. `agent.shutdown` is best effort only: a shell must also treat the IPC
+connection closing as the authoritative offline signal.
 
 ## State and crash recovery
 
