@@ -705,6 +705,9 @@ async function moveWithoutReplacing(source, target, fsyncDirectoryImpl) {
     await link(source, target);
   } catch (error) {
     if (error?.code === "ENOENT" || error?.code === "EEXIST") return false;
+    // Same Windows pending-deletion race as moveToUniqueTarget: link reports EPERM while
+    // the source still has an open handle from the process that just removed it.
+    if (error?.code === "EPERM" && !(await pathExists(source))) return false;
     throw error;
   }
   const sourceDirectory = dirname(source);
@@ -715,11 +718,29 @@ async function moveWithoutReplacing(source, target, fsyncDirectoryImpl) {
   return true;
 }
 
+async function pathExists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    // Any other failure means we cannot prove the entry is gone, so let the caller's
+    // original error stand rather than silently reclassifying it as a lost race.
+    return true;
+  }
+}
+
 async function moveToUniqueTarget(source, target, fsyncDirectoryImpl) {
   try {
     await rename(source, target);
   } catch (error) {
     if (error?.code === "ENOENT" || error?.code === "EEXIST") return false;
+    // Windows reports EPERM, not ENOENT, when a concurrent process removed the source
+    // between our readdir and this rename: the deletion is only pending until that
+    // process closes its handle, so the entry still exists but cannot be renamed. Treat
+    // it as a lost race only after confirming the source is gone, so a genuine
+    // permission fault on a file that is still there keeps propagating.
+    if (error?.code === "EPERM" && !(await pathExists(source))) return false;
     throw error;
   }
   const sourceDirectory = dirname(source);
