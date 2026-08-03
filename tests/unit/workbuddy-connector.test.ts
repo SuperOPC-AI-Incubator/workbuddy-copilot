@@ -29,6 +29,7 @@ const MESSAGE_ID = "40000000-0000-4000-8000-000000000001";
 const MESSAGE_TWO = "40000000-0000-4000-8000-000000000002";
 
 const cleanupPaths: string[] = [];
+const cleanupAcls: string[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
@@ -40,13 +41,43 @@ afterEach(async () => {
         }),
     ),
   );
-  await Promise.all(cleanupPaths.splice(0).map((path) => rm(path, { recursive: true })));
+  // Deny entries must go before rm, otherwise the temp directory cannot be removed.
+  for (const path of cleanupAcls.splice(0)) {
+    await restoreDeletePermission(path);
+  }
+  await Promise.all(
+    cleanupPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 async function temporaryState(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "superbrain-connector-"));
   cleanupPaths.push(path);
   return path;
+}
+
+// Deny DELETE on one file so Windows fails rename with EPERM while the entry stays on
+// disk. This is the only way to tell a genuine permission fault apart from a lost race
+// without stubbing the filesystem, and the ACL is always removed again by the caller.
+async function runIcacls(args: string[]): Promise<boolean> {
+  const { spawnSync } = await import("node:child_process");
+  const result = spawnSync("icacls", args, { encoding: "utf8", windowsHide: true });
+  return result.status === 0;
+}
+
+async function denyDeletePermission(path: string): Promise<boolean> {
+  const user = process.env.USERNAME;
+  if (!user) return false;
+  const applied = await runIcacls([path, "/deny", `${user}:(D)`]);
+  if (!applied) return false;
+  cleanupAcls.push(path);
+  return true;
+}
+
+async function restoreDeletePermission(path: string): Promise<void> {
+  const user = process.env.USERNAME;
+  if (!user) return;
+  await runIcacls([path, "/remove:d", user]);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -327,6 +358,39 @@ describe("WorkBuddy connector durable outbound queue", () => {
 
     await expect(Promise.all([first.flush(), second.flush()])).resolves.toHaveLength(2);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  test("a genuine EPERM on a claim that still exists is not swallowed as a lost race", async () => {
+    // Windows reports EPERM for two different situations: a source a competing process has
+    // already removed (a lost race, which recoverStaleClaims must absorb) and a source that
+    // cannot be renamed while it still exists (a real fault, which must surface). Denying
+    // DELETE on the file reproduces the second case, so this test fails if the EPERM branch
+    // ever stops confirming the source is gone before reporting a lost race.
+    if (process.platform !== "win32") return;
+
+    const stateDir = await temporaryState();
+    const event = turn();
+    const connector = await configuredConnector({
+      stateDir,
+      fetchImpl: vi.fn(async () => Response.json({ ok: true })),
+      now: () => 10_000,
+      claimStaleMs: 100,
+      retryCount: 0,
+    });
+
+    // A claim filename the parser rejects goes straight to quarantineFile, so the rename
+    // under test is the first filesystem operation recoverStaleClaims performs.
+    const claimPath = join(connector.paths.claims, "not-a-valid-claim-name.json");
+    await writeFile(claimPath, `${JSON.stringify(event)}\n`);
+    const denied = await denyDeletePermission(claimPath);
+    if (!denied) return; // ACL could not be applied; nothing meaningful to assert
+
+    try {
+      await expect(connector.flush()).rejects.toMatchObject({ code: "EPERM" });
+      await expect(stat(claimPath)).resolves.toBeDefined();
+    } finally {
+      await restoreDeletePermission(claimPath);
+    }
   });
 
   test("durable moves fsync target before unlink/source and unique renames fsync target first", async () => {
