@@ -447,9 +447,7 @@ describe("WorkBuddy connector durable outbound queue", () => {
     await expect(connector.flush()).resolves.toMatchObject({ sent: 2, quarantined: 0 });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(await readdir(connector.paths.outbox)).toHaveLength(0);
-    expect(await readdir(connector.paths.staging)).toEqual([
-      `${liveEvent.event_id}.claiming.json`,
-    ]);
+    expect(await readdir(connector.paths.staging)).toEqual([`${liveEvent.event_id}.claiming.json`]);
   });
 
   test("a genuine EPERM on a claim that still exists is not swallowed as a lost race", async () => {
