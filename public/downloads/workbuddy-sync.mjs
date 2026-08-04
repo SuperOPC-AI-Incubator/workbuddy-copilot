@@ -30,6 +30,11 @@ const DEFAULT_RESPONSE_MAX_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_RETRY_COUNT = 3;
 const DEFAULT_CLAIM_STALE_MS = 15 * 60 * 1_000;
+// Staging files are held for microseconds by a live claim, so anything older than this
+// wall-clock grace window belongs to a crashed process and can be restored. Deliberately
+// compared against the real clock, not the injectable now(): staleness here guards crash
+// recovery, not business logic.
+const STAGING_ORPHAN_MIN_AGE_MS = 60 * 1_000;
 const DEFAULT_LOCK_STALE_MS = 2 * 60 * 1_000;
 const DEFAULT_LOCK_ATTEMPTS = 200;
 const MIN_LIVE_PID_GRACE_MS = 30 * 1_000;
@@ -95,6 +100,7 @@ function connectorPaths(root) {
     config: join(root, "config.json"),
     outbox: join(root, "outbox"),
     claims: join(root, "claims"),
+    staging: join(root, "staging"),
     quarantine: join(root, "quarantine"),
     renderLedger: join(root, "render-ledger"),
   };
@@ -108,7 +114,13 @@ async function enforceMode(path, mode) {
 async function ensureLayout(paths) {
   await mkdir(paths.root, { recursive: true, mode: 0o700 });
   await enforceMode(paths.root, 0o700);
-  for (const directory of [paths.outbox, paths.claims, paths.quarantine, paths.renderLedger]) {
+  for (const directory of [
+    paths.outbox,
+    paths.claims,
+    paths.staging,
+    paths.quarantine,
+    paths.renderLedger,
+  ]) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await enforceMode(directory, 0o700);
   }
@@ -705,6 +717,9 @@ async function moveWithoutReplacing(source, target, fsyncDirectoryImpl) {
     await link(source, target);
   } catch (error) {
     if (error?.code === "ENOENT" || error?.code === "EEXIST") return false;
+    // Same Windows pending-deletion race as moveToUniqueTarget: link reports EPERM while
+    // the source still has an open handle from the process that just removed it.
+    if (error?.code === "EPERM" && !(await pathExists(source))) return false;
     throw error;
   }
   const sourceDirectory = dirname(source);
@@ -715,17 +730,72 @@ async function moveWithoutReplacing(source, target, fsyncDirectoryImpl) {
   return true;
 }
 
+async function pathExists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    // Any other failure means we cannot prove the entry is gone, so let the caller's
+    // original error stand rather than silently reclassifying it as a lost race.
+    return true;
+  }
+}
+
 async function moveToUniqueTarget(source, target, fsyncDirectoryImpl) {
   try {
     await rename(source, target);
   } catch (error) {
     if (error?.code === "ENOENT" || error?.code === "EEXIST") return false;
+    // Windows reports EPERM, not ENOENT, when a concurrent process removed the source
+    // between our readdir and this rename: the deletion is only pending until that
+    // process closes its handle, so the entry still exists but cannot be renamed. Treat
+    // it as a lost race only after confirming the source is gone, so a genuine
+    // permission fault on a file that is still there keeps propagating.
+    if (error?.code === "EPERM" && !(await pathExists(source))) return false;
     throw error;
   }
   const sourceDirectory = dirname(source);
   const targetDirectory = dirname(target);
   await fsyncDirectoryImpl(targetDirectory);
   if (sourceDirectory !== targetDirectory) await fsyncDirectoryImpl(sourceDirectory);
+  return true;
+}
+
+// Claims an outbox event by way of a deterministic staging name. Exclusivity comes from
+// link() onto that shared name: the second process to link gets EEXIST, atomically, on
+// every platform. rename() cannot be used for the handoff — on Windows, two processes
+// renaming the same source to *different* targets can both report success (the losing
+// rename silently no-ops), and not even a stat() read-back is a reliable arbiter: the
+// loser's stat can transiently resolve the winning inode through its own path while
+// readdir already shows a single entry (verified by probe, ~1% of races).
+async function claimOutboxEvent(outbox, staging, claim, fsyncDirectoryImpl) {
+  try {
+    await link(outbox, staging);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EEXIST") return false;
+    // Same Windows pending-deletion race as moveToUniqueTarget: link reports EPERM while
+    // the source still has an open handle from the process that just removed it.
+    if (error?.code === "EPERM" && !(await pathExists(outbox))) return false;
+    throw error;
+  }
+  // We exclusively hold the staging name now. Make the link durable before touching the
+  // outbox entry, then remove the outbox entry BEFORE publishing the final claim: a crash
+  // must never leave both a live claim and a re-claimable outbox entry for the same
+  // event, or the stale-claim recovery would upload it twice.
+  await fsyncDirectoryImpl(dirname(staging));
+  await rm(outbox, { force: true });
+  await fsyncDirectoryImpl(dirname(outbox));
+  try {
+    await rename(staging, claim);
+  } catch (error) {
+    // Only reachable if recoverStaleStaging reclaimed the staging file while this
+    // process stalled past the orphan grace window; the event is safe in the outbox.
+    if (error?.code === "ENOENT" || error?.code === "EPERM") return false;
+    throw error;
+  }
+  await fsyncDirectoryImpl(dirname(claim));
+  if (dirname(claim) !== dirname(staging)) await fsyncDirectoryImpl(dirname(staging));
   return true;
 }
 
@@ -964,6 +1034,38 @@ export function createWorkbuddyConnector(options = {}) {
     }
   }
 
+  // Restores staging files orphaned by a process that crashed mid-claim. A live claim
+  // holds its staging file for microseconds, so anything older than the wall-clock
+  // grace window is a crash leftover: restore it to the outbox, or drop it when the
+  // outbox still holds the event (crash between link and outbox removal — the staging
+  // file is then a hard-linked duplicate of the same content).
+  async function recoverStaleStaging() {
+    let names;
+    try {
+      names = await readdir(paths.staging);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    for (const name of names.filter((entry) => entry.endsWith(".claiming.json"))) {
+      const eventId = basename(name, ".claiming.json");
+      if (!UUID_PATTERN.test(eventId)) continue;
+      const staging = join(paths.staging, name);
+      const info = await stat(staging).catch(() => null);
+      if (!info) continue;
+      if (Date.now() - info.mtimeMs < STAGING_ORPHAN_MIN_AGE_MS) continue;
+      const restored = await moveWithoutReplacing(
+        staging,
+        join(paths.outbox, `${eventId}.json`),
+        fsyncDirectoryImpl,
+      );
+      if (!restored) {
+        await rm(staging, { force: true });
+        await fsyncDirectoryImpl(paths.staging);
+      }
+    }
+  }
+
   async function quarantineFile(path, reason) {
     const safeReason = reason.replace(/[^a-z0-9_-]/gi, "-").slice(0, 48);
     const target = join(paths.quarantine, `${basename(path, ".json")}.${now()}.${safeReason}.json`);
@@ -986,6 +1088,7 @@ export function createWorkbuddyConnector(options = {}) {
     await ensureLayout(paths);
     await readConfig();
     await recoverStaleClaims();
+    await recoverStaleStaging();
     const result = { sent: 0, duplicate: 0, retained: 0, quarantined: 0 };
     const names = (await readdir(paths.outbox)).filter((name) => name.endsWith(".json")).sort();
     for (const name of names) {
@@ -996,11 +1099,12 @@ export function createWorkbuddyConnector(options = {}) {
         result.quarantined += 1;
         continue;
       }
+      const staging = join(paths.staging, `${eventIdFromName}.claiming.json`);
       const claim = join(
         paths.claims,
         claimFilename(eventIdFromName, now(), process.pid, randomUUID()),
       );
-      if (!(await moveToUniqueTarget(outbox, claim, fsyncDirectoryImpl))) continue;
+      if (!(await claimOutboxEvent(outbox, staging, claim, fsyncDirectoryImpl))) continue;
 
       let event;
       try {

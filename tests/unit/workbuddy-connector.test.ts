@@ -29,6 +29,7 @@ const MESSAGE_ID = "40000000-0000-4000-8000-000000000001";
 const MESSAGE_TWO = "40000000-0000-4000-8000-000000000002";
 
 const cleanupPaths: string[] = [];
+const cleanupAcls: string[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
@@ -40,13 +41,43 @@ afterEach(async () => {
         }),
     ),
   );
-  await Promise.all(cleanupPaths.splice(0).map((path) => rm(path, { recursive: true })));
+  // Deny entries must go before rm, otherwise the temp directory cannot be removed.
+  for (const path of cleanupAcls.splice(0)) {
+    await restoreDeletePermission(path);
+  }
+  await Promise.all(
+    cleanupPaths.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 async function temporaryState(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "superbrain-connector-"));
   cleanupPaths.push(path);
   return path;
+}
+
+// Deny DELETE on one file so Windows fails rename with EPERM while the entry stays on
+// disk. This is the only way to tell a genuine permission fault apart from a lost race
+// without stubbing the filesystem, and the ACL is always removed again by the caller.
+async function runIcacls(args: string[]): Promise<boolean> {
+  const { spawnSync } = await import("node:child_process");
+  const result = spawnSync("icacls", args, { encoding: "utf8", windowsHide: true });
+  return result.status === 0;
+}
+
+async function denyDeletePermission(path: string): Promise<boolean> {
+  const user = process.env.USERNAME;
+  if (!user) return false;
+  const applied = await runIcacls([path, "/deny", `${user}:(D)`]);
+  if (!applied) return false;
+  cleanupAcls.push(path);
+  return true;
+}
+
+async function restoreDeletePermission(path: string): Promise<void> {
+  const user = process.env.USERNAME;
+  if (!user) return;
+  await runIcacls([path, "/remove:d", user]);
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -231,6 +262,43 @@ describe("WorkBuddy connector durable outbound queue", () => {
     expect(requests).toBe(1);
   });
 
+  test("a rename that silently no-ops on Windows never becomes a second upload", async () => {
+    // Windows can report success for both renames when two processes move the same
+    // outbox file to different claim targets: the loser's rename is a phantom no-op,
+    // and even a stat() read-back can resolve the winning inode through the loser's
+    // path, so neither is a reliable arbiter. The fix claims exclusively via link()
+    // onto a shared deterministic staging name (second linker gets EEXIST). The race
+    // reproduces in-process through the libuv thread pool (~7% per round on Windows),
+    // so many rounds make the pre-fix failure near-certain. After the fix every round
+    // must send exactly one request — there is no flaky pass.
+    const rounds = process.platform === "win32" ? 50 : 5;
+    let totalRequests = 0;
+    for (let round = 0; round < rounds; round += 1) {
+      const stateDir = await temporaryState();
+      const event = turn(crypto.randomUUID());
+      const fetchImpl = vi.fn(async () => {
+        totalRequests += 1;
+        return Response.json({
+          ok: true,
+          event_id: event.event_id,
+          session_id: SESSION_ID,
+          item_ids: { prompt: crypto.randomUUID(), reply: crypto.randomUUID(), diagnosis: null },
+          duplicate: false,
+        });
+      });
+      const first = await configuredConnector({ stateDir, fetchImpl });
+      const second = createWorkbuddyConnector({
+        stateDir,
+        fetchImpl,
+        sleep: async () => undefined,
+        jitter: () => 0,
+      });
+      await first.enqueueEvent(event);
+      await Promise.all([first.flush(), second.flush()]);
+      expect(totalRequests).toBe(round + 1);
+    }
+  });
+
   test("uses claim time, not old outbox mtime, and recovers only a truly expired claim", async () => {
     const stateDir = await temporaryState();
     let currentTime = 1_000;
@@ -329,6 +397,92 @@ describe("WorkBuddy connector durable outbound queue", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  test("restores staging files orphaned by a crashed claim, dropping hard-linked duplicates", async () => {
+    const stateDir = await temporaryState();
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const event = JSON.parse(String(init?.body)) as { event_id: string };
+      return Response.json({
+        ok: true,
+        event_id: event.event_id,
+        session_id: SESSION_ID,
+        item_ids: { prompt: crypto.randomUUID(), reply: crypto.randomUUID(), diagnosis: null },
+        duplicate: false,
+      });
+    });
+    const connector = await configuredConnector({ stateDir, fetchImpl });
+    // Crash between outbox removal and final rename: staging is the only copy left.
+    const restoredEvent = turn("10000000-0000-4000-8000-000000000007");
+    await writeFile(
+      join(connector.paths.staging, `${restoredEvent.event_id}.claiming.json`),
+      `${JSON.stringify(restoredEvent)}\n`,
+    );
+    // Crash between link and outbox removal: staging is a hard-linked duplicate.
+    const duplicateEvent = turn("10000000-0000-4000-8000-000000000008");
+    await writeFile(
+      join(connector.paths.outbox, `${duplicateEvent.event_id}.json`),
+      `${JSON.stringify(duplicateEvent)}\n`,
+    );
+    await writeFile(
+      join(connector.paths.staging, `${duplicateEvent.event_id}.claiming.json`),
+      `${JSON.stringify(duplicateEvent)}\n`,
+    );
+    // Still inside the wall-clock grace window: belongs to a live claim, do not touch.
+    const liveEvent = turn("10000000-0000-4000-8000-000000000009");
+    await writeFile(
+      join(connector.paths.staging, `${liveEvent.event_id}.claiming.json`),
+      `${JSON.stringify(liveEvent)}\n`,
+    );
+    const stale = new Date(Date.now() - 120_000);
+    await utimes(
+      join(connector.paths.staging, `${restoredEvent.event_id}.claiming.json`),
+      stale,
+      stale,
+    );
+    await utimes(
+      join(connector.paths.staging, `${duplicateEvent.event_id}.claiming.json`),
+      stale,
+      stale,
+    );
+
+    await expect(connector.flush()).resolves.toMatchObject({ sent: 2, quarantined: 0 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(await readdir(connector.paths.outbox)).toHaveLength(0);
+    expect(await readdir(connector.paths.staging)).toEqual([`${liveEvent.event_id}.claiming.json`]);
+  });
+
+  test("a genuine EPERM on a claim that still exists is not swallowed as a lost race", async () => {
+    // Windows reports EPERM for two different situations: a source a competing process has
+    // already removed (a lost race, which recoverStaleClaims must absorb) and a source that
+    // cannot be renamed while it still exists (a real fault, which must surface). Denying
+    // DELETE on the file reproduces the second case, so this test fails if the EPERM branch
+    // ever stops confirming the source is gone before reporting a lost race.
+    if (process.platform !== "win32") return;
+
+    const stateDir = await temporaryState();
+    const event = turn();
+    const connector = await configuredConnector({
+      stateDir,
+      fetchImpl: vi.fn(async () => Response.json({ ok: true })),
+      now: () => 10_000,
+      claimStaleMs: 100,
+      retryCount: 0,
+    });
+
+    // A claim filename the parser rejects goes straight to quarantineFile, so the rename
+    // under test is the first filesystem operation recoverStaleClaims performs.
+    const claimPath = join(connector.paths.claims, "not-a-valid-claim-name.json");
+    await writeFile(claimPath, `${JSON.stringify(event)}\n`);
+    const denied = await denyDeletePermission(claimPath);
+    if (!denied) return; // ACL could not be applied; nothing meaningful to assert
+
+    try {
+      await expect(connector.flush()).rejects.toMatchObject({ code: "EPERM" });
+      await expect(stat(claimPath)).resolves.toBeDefined();
+    } finally {
+      await restoreDeletePermission(claimPath);
+    }
+  });
+
   test("durable moves fsync target before unlink/source and unique renames fsync target first", async () => {
     const stateDir = await temporaryState();
     const fsyncEvents: Array<{
@@ -368,9 +522,24 @@ describe("WorkBuddy connector durable outbound queue", () => {
     watchedSource = queued;
     fsyncEvents.length = 0;
     await connector.flush();
-    expect(fsyncEvents.slice(0, 2).map((entry) => entry.directory)).toEqual([
-      connector.paths.claims,
-      connector.paths.outbox,
+    // The link-based claim must fsync the staging link before removing the outbox
+    // entry, and fsync the outbox removal before publishing the final claim.
+    expect(fsyncEvents.slice(0, 3)).toEqual([
+      {
+        directory: connector.paths.staging,
+        sourceExists: true,
+        targetExists: false,
+      },
+      {
+        directory: connector.paths.outbox,
+        sourceExists: false,
+        targetExists: false,
+      },
+      {
+        directory: connector.paths.claims,
+        sourceExists: false,
+        targetExists: false,
+      },
     ]);
 
     const staleEvent = turn("10000000-0000-4000-8000-000000000006");

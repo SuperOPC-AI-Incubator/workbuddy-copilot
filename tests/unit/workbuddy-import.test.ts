@@ -67,9 +67,13 @@ function assistantRow(id: string, text: string, timestamp: number, sessionId: st
 
 type Round = { userId: string; prompt: string; assistantId: string; reply: string };
 
+// import 有硬性 7 天窗口：夹具时间戳必须锚定"现在"。写死的历史日期会随时间漂出
+// 窗口，导致全部用例静默变红（2026-08-04：07-24 写死的基准在 11 天后炸了 12 个用例）。
+const FIXTURE_BASE = Date.now() - 60_000;
+
 function sessionBody(sessionId: string, cwd: string, title: string, rounds: Round[]): string {
   const rows = [JSON.stringify({ timestamp: 1, type: "ai-title", aiTitle: title, sessionId, cwd })];
-  let clock = 1_784_900_000_000;
+  let clock = FIXTURE_BASE;
   for (const round of rounds) {
     rows.push(userRow(round.userId, round.prompt, (clock += 1_000), sessionId, cwd));
     rows.push(assistantRow(round.assistantId, round.reply, (clock += 1_000), sessionId, cwd));
@@ -879,12 +883,12 @@ describe("import and the Stop hook agree on identity", () => {
         sessionId: session,
         cwd,
       }),
-      userRow("u1", "第一个问题", 1_784_900_001_000, session, cwd),
-      assistantRow("a1", "第一个回答", 1_784_900_002_000, session, cwd),
+      userRow("u1", "第一个问题", FIXTURE_BASE + 1_000, session, cwd),
+      assistantRow("a1", "第一个回答", FIXTURE_BASE + 2_000, session, cwd),
     ].join("\n");
     const fillerRow = JSON.stringify({
       id: "fc",
-      timestamp: 1_784_900_003_000,
+      timestamp: FIXTURE_BASE + 3_000,
       type: "function_call_result",
       name: "read_file",
       callId: "c",
@@ -895,8 +899,8 @@ describe("import and the Stop hook agree on identity", () => {
     });
     const filler = Array.from({ length: 40 }, () => fillerRow).join("\n");
     const tail = [
-      userRow("u9", "最后一个问题", 1_784_900_009_000, session, cwd),
-      assistantRow("a9", "最后一个回答", 1_784_900_010_000, session, cwd),
+      userRow("u9", "最后一个问题", FIXTURE_BASE + 9_000, session, cwd),
+      assistantRow("a9", "最后一个回答", FIXTURE_BASE + 10_000, session, cwd),
     ].join("\n");
     const body = `${head}\n${filler}\n${tail}\n`;
 
@@ -962,7 +966,7 @@ describe("import and the Stop hook agree on identity", () => {
     const fillerRow = (marker: string) =>
       JSON.stringify({
         id: "fc",
-        timestamp: 1_784_900_003_000,
+        timestamp: FIXTURE_BASE + 3_000,
         type: "function_call_result",
         name: "read_file",
         callId: "c",
@@ -984,8 +988,8 @@ describe("import and the Stop hook agree on identity", () => {
     });
     const afterTitle = Array.from({ length: 32 }, () => fillerRow("后")).join("\n");
     const lastRound = [
-      userRow("u9", "中段标题会话的最后一个问题", 1_784_900_009_000, session, cwd),
-      assistantRow("a9", "中段标题会话的最后一个回答", 1_784_900_010_000, session, cwd),
+      userRow("u9", "中段标题会话的最后一个问题", FIXTURE_BASE + 9_000, session, cwd),
+      assistantRow("a9", "中段标题会话的最后一个回答", FIXTURE_BASE + 10_000, session, cwd),
     ].join("\n");
     const body = `${beforeTitle}\n${middleTitle}\n${afterTitle}\n${lastRound}\n`;
     const transcriptPath = await writeSession(projectsDir, "middle", session, body);

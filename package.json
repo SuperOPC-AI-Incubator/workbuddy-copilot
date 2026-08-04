@@ -1,6 +1,9 @@
 {
   "name": "tanstack_start_ts",
   "private": true,
+  "patchedDependencies": {
+    "@lovable.dev/mcp-js@0.22.0": "patches/@lovable.dev%2Fmcp-js@0.22.0.patch"
+  },
   "sideEffects": false,
   "type": "module",
   "scripts": {

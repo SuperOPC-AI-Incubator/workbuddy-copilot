@@ -3,6 +3,7 @@ export type ConnectorPaths = {
   config: string;
   outbox: string;
   claims: string;
+  staging: string;
   quarantine: string;
   renderLedger: string;
 };
